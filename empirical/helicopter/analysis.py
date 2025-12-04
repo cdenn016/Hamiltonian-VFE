@@ -34,13 +34,25 @@ Author: Hamiltonian-VFE Team
 Date: December 2025
 """
 
+import sys
 import numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
+from pathlib import Path
 from scipy import stats
 
-from .data_loader import SubjectData
-from .fitting import ModelFit, ModelComparison
+# Handle both module execution and direct script execution
+try:
+    from .data_loader import SubjectData
+    from .fitting import ModelFit, ModelComparison
+except ImportError:
+    _this_dir = Path(__file__).parent
+    _project_root = _this_dir.parent.parent
+    if str(_project_root) not in sys.path:
+        sys.path.insert(0, str(_project_root))
+
+    from empirical.helicopter.data_loader import SubjectData
+    from empirical.helicopter.fitting import ModelFit, ModelComparison
 
 
 # =============================================================================

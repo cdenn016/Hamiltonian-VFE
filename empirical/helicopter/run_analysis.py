@@ -17,28 +17,56 @@ Date: December 2025
 """
 
 import argparse
+import sys
 import numpy as np
 from pathlib import Path
 from datetime import datetime
 
-from .data_loader import (
-    load_mcguire_nassar_2014,
-    compute_summary_stats
-)
-from .fitting import (
-    compare_dynamics,
-    summarize_comparisons
-)
-from .analysis import (
-    analyze_all_subjects,
-    summarize_inertia_evidence
-)
-from .visualization import (
-    plot_belief_trajectory,
-    plot_changepoint_response,
-    plot_model_comparison_summary,
-    plot_inertia_evidence_summary
-)
+# Handle both module execution and direct script execution
+try:
+    from .data_loader import (
+        load_mcguire_nassar_2014,
+        compute_summary_stats
+    )
+    from .fitting import (
+        compare_dynamics,
+        summarize_comparisons
+    )
+    from .analysis import (
+        analyze_all_subjects,
+        summarize_inertia_evidence
+    )
+    from .visualization import (
+        plot_belief_trajectory,
+        plot_changepoint_response,
+        plot_model_comparison_summary,
+        plot_inertia_evidence_summary
+    )
+except ImportError:
+    # Running as script - add parent directories to path
+    _this_dir = Path(__file__).parent
+    _project_root = _this_dir.parent.parent
+    if str(_project_root) not in sys.path:
+        sys.path.insert(0, str(_project_root))
+
+    from empirical.helicopter.data_loader import (
+        load_mcguire_nassar_2014,
+        compute_summary_stats
+    )
+    from empirical.helicopter.fitting import (
+        compare_dynamics,
+        summarize_comparisons
+    )
+    from empirical.helicopter.analysis import (
+        analyze_all_subjects,
+        summarize_inertia_evidence
+    )
+    from empirical.helicopter.visualization import (
+        plot_belief_trajectory,
+        plot_changepoint_response,
+        plot_model_comparison_summary,
+        plot_inertia_evidence_summary
+    )
 
 
 def run_full_analysis(subject_ids: list = None,

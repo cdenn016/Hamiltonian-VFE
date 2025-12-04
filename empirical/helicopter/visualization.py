@@ -9,14 +9,26 @@ Author: Hamiltonian-VFE Team
 Date: December 2025
 """
 
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import List, Optional, Dict
 from pathlib import Path
 
-from .data_loader import SubjectData
-from .fitting import ModelFit, ModelComparison
-from .analysis import InertiaAnalysis
+# Handle both module execution and direct script execution
+try:
+    from .data_loader import SubjectData
+    from .fitting import ModelFit, ModelComparison
+    from .analysis import InertiaAnalysis
+except ImportError:
+    _this_dir = Path(__file__).parent
+    _project_root = _this_dir.parent.parent
+    if str(_project_root) not in sys.path:
+        sys.path.insert(0, str(_project_root))
+
+    from empirical.helicopter.data_loader import SubjectData
+    from empirical.helicopter.fitting import ModelFit, ModelComparison
+    from empirical.helicopter.analysis import InertiaAnalysis
 
 
 # =============================================================================
