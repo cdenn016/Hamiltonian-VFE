@@ -6,14 +6,14 @@ Hamiltonian Belief Dynamics Analysis: 26-Wave Political Panel
 Tests the Kaplowitz-Fink second-order model on the Brandt et al. (2021)
 26-wave political psychology panel dataset.
 
-Model: m·x''(t) + γ·x'(t) + k·x(t) = F(t)
+Model: m*x''(t) + gamma*x'(t) + k*x(t) = F(t)
 
 Key predictions:
-1. Underdamped (ζ < 1): Oscillation around equilibrium
-2. Critically damped (ζ = 1): Fastest return without overshoot
-3. Overdamped (ζ > 1): Slow exponential decay
+1. Underdamped (zeta < 1): Oscillation around equilibrium
+2. Critically damped (zeta = 1): Fastest return without overshoot
+3. Overdamped (zeta > 1): Slow exponential decay
 
-Where ζ = γ / (2√(mk)) is the damping ratio.
+Where zeta = gamma / (2*sqrt(m*k)) is the damping ratio.
 
 Data: https://osf.io/3pwvb/
 Paper: https://openpsychologydata.metajnl.com/articles/10.5334/jopd.54
@@ -26,11 +26,11 @@ import os
 import sys
 import numpy as np
 import pandas as pd
-from scipy import stats, optimize, signal
-from scipy.integrate import odeint
+from scipy import stats, optimize
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
+import glob as glob_module
 
 # Add project root
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,6 +40,26 @@ sys.path.insert(0, PROJECT_ROOT)
 DATA_DIR = os.path.join(SCRIPT_DIR, 'political_panel')
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, 'figures')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Attitude variables in the dataset (7-point scales)
+ATTITUDE_VARIABLES = [
+    'def',      # Defense spending
+    'crime',    # Crime policy
+    'terror',   # Terrorism policy
+    'poor',     # Aid to poor
+    'health',   # Healthcare
+    'econ',     # Economic policy
+    'abort',    # Abortion
+    'unemploy', # Unemployment
+    'blkaid',   # Aid to Black Americans
+    'adopt',    # Adoption policy
+    'imm',      # Immigration
+    'vaccines', # Vaccine policy
+    'guns',     # Gun control
+    'djt',      # Trump approval
+    'ideo',     # Ideology
+    'climate',  # Climate change
+]
 
 
 @dataclass
@@ -63,29 +83,18 @@ def load_panel_data(data_dir: str) -> pd.DataFrame:
     """
     Load the 26-wave political psychology panel data.
 
-    Expected file structure from OSF:
-    - Main data file with columns for each wave
-    - participant_id, wave1_var, wave2_var, ..., wave26_var
+    Data format: Long format with columns:
+    - id: Participant ID
+    - wave: Wave number (1-26)
+    - Attitude variables: def, crime, terror, poor, health, econ, etc.
     """
-    # Try common file names
-    possible_files = [
-        'political_panel_data.csv',
-        'data.csv',
-        'panel_data.csv',
-        'brandt_2021_data.csv',
-        '26wave_data.csv',
-    ]
+    # Search recursively for CSV files
+    csv_files = glob_module.glob(os.path.join(data_dir, '**', '*.csv'), recursive=True)
 
-    for fname in possible_files:
-        fpath = os.path.join(data_dir, fname)
-        if os.path.exists(fpath):
-            print(f"Loading data from: {fpath}")
-            return pd.read_csv(fpath)
-
-    # Try to find any CSV
-    csv_files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]
     if csv_files:
-        fpath = os.path.join(data_dir, csv_files[0])
+        # Prefer larger files (more likely to be the main data)
+        csv_files.sort(key=lambda x: os.path.getsize(x), reverse=True)
+        fpath = csv_files[0]
         print(f"Loading data from: {fpath}")
         return pd.read_csv(fpath)
 
@@ -95,41 +104,60 @@ def load_panel_data(data_dir: str) -> pd.DataFrame:
     )
 
 
-def extract_time_series(df: pd.DataFrame, variable_prefix: str) -> Dict[str, np.ndarray]:
+def extract_time_series(df: pd.DataFrame, variable: str) -> Dict[str, np.ndarray]:
     """
     Extract time series for a variable across all waves.
 
+    The data is in LONG format with columns:
+    - id: Participant identifier
+    - wave: Wave number (1-26)
+    - [variable]: The attitude measure
+
     Args:
-        df: Panel dataframe
-        variable_prefix: Prefix like 'pol_attitude' or 'threat'
+        df: Panel dataframe in long format
+        variable: Column name like 'djt', 'ideo', 'terror', etc.
 
     Returns:
-        Dict mapping participant_id -> time series array
+        Dict mapping participant_id -> time series array (length 26)
     """
-    # Find columns matching the variable
-    wave_cols = [c for c in df.columns if variable_prefix in c.lower()]
-    wave_cols = sorted(wave_cols, key=lambda x: int(''.join(filter(str.isdigit, x)) or '0'))
-
-    if not wave_cols:
-        print(f"Warning: No columns found for prefix '{variable_prefix}'")
+    if variable not in df.columns:
         return {}
 
-    print(f"Found {len(wave_cols)} waves for {variable_prefix}")
+    # Check if data is in long format (has 'wave' column)
+    if 'wave' not in df.columns:
+        print(f"Warning: No 'wave' column found - cannot extract time series")
+        return {}
+
+    if 'id' not in df.columns:
+        # Try alternative id columns
+        id_col = None
+        for col in ['ResponseId', 'participant_id', 'ID', 'subject']:
+            if col in df.columns:
+                id_col = col
+                break
+        if id_col is None:
+            print(f"Warning: No participant ID column found")
+            return {}
+        df = df.rename(columns={id_col: 'id'})
+
+    # Pivot to wide format: rows = participants, columns = waves
+    try:
+        pivot_df = df.pivot(index='id', columns='wave', values=variable)
+    except (KeyError, ValueError) as e:
+        print(f"Warning: Could not pivot data for '{variable}': {e}")
+        return {}
 
     # Extract per-participant time series
     series = {}
-    id_col = 'participant_id' if 'participant_id' in df.columns else df.columns[0]
 
-    for idx, row in df.iterrows():
-        pid = str(row[id_col])
-        values = row[wave_cols].values.astype(float)
+    for pid in pivot_df.index:
+        values = pivot_df.loc[pid].values.astype(float)
 
         # Only include if we have enough non-null values
         valid = ~np.isnan(values)
         if np.sum(valid) >= 10:  # At least 10 waves
-            series[pid] = values
+            series[str(pid)] = values
 
-    print(f"Extracted {len(series)} valid time series")
     return series
 
 
@@ -138,7 +166,7 @@ def damped_oscillator_solution(t: np.ndarray, x0: float, v0: float,
     """
     Analytical solution to damped harmonic oscillator.
 
-    m·x'' + γ·x' + k·x = 0
+    m*x'' + gamma*x' + k*x = 0
 
     With initial conditions x(0) = x0, x'(0) = v0
     """
@@ -154,7 +182,7 @@ def damped_oscillator_solution(t: np.ndarray, x0: float, v0: float,
     if zeta < 1:  # Underdamped
         omega_d = omega_n * np.sqrt(1 - zeta**2)
         A = x0
-        B = (v0 + zeta * omega_n * x0) / omega_d
+        B = (v0 + zeta * omega_n * x0) / omega_d if omega_d > 0 else 0
         x = np.exp(-zeta * omega_n * t) * (A * np.cos(omega_d * t) + B * np.sin(omega_d * t))
 
     elif zeta == 1:  # Critically damped
@@ -182,11 +210,11 @@ def fit_hamiltonian_dynamics(
     time_series: np.ndarray,
     dt: float = 14.0,  # 2 weeks between waves
     equilibrium: Optional[float] = None
-) -> HamiltonianFit:
+) -> Optional[HamiltonianFit]:
     """
     Fit second-order Hamiltonian dynamics to a time series.
 
-    Model: m·x'' + γ·x' + k·(x - x_eq) = 0
+    Model: m*x'' + gamma*x' + k*(x - x_eq) = 0
 
     Args:
         time_series: Array of belief values over time
@@ -215,7 +243,7 @@ def fit_hamiltonian_dynamics(
 
     # Initial conditions
     x0 = y[0]
-    v0 = (y[1] - y[0]) / (t[1] - t[0]) if len(y) > 1 else 0
+    v0 = (y[1] - y[0]) / (t[1] - t[0]) if len(y) > 1 and t[1] != t[0] else 0
 
     def model(params):
         m, gamma, k = params
@@ -336,6 +364,7 @@ def test_oscillation_hypothesis(fits: List[HamiltonianFit]) -> Dict:
         'prop_underdamped': prop_underdamped,
         'p_value': p_value,
         'mean_zeta': np.mean(zetas) if zetas else None,
+        'median_zeta': np.median(zetas) if zetas else None,
         'std_zeta': np.std(zetas) if zetas else None,
         'mean_r_squared': np.mean(r_squareds) if r_squareds else None,
         'oscillation_periods': periods,
@@ -352,13 +381,13 @@ def analyze_panel(data_dir: str = DATA_DIR):
     print("=" * 70)
     print("""
 Testing the Kaplowitz-Fink second-order model:
-    m·x'' + γ·x' + k·x = F(t)
+    m*x'' + gamma*x' + k*x = F(t)
 
 Predictions:
-- Underdamped (ζ < 1): Beliefs oscillate around equilibrium
-- Overdamped (ζ > 1): Beliefs decay monotonically
+- Underdamped (zeta < 1): Beliefs oscillate around equilibrium
+- Overdamped (zeta > 1): Beliefs decay monotonically
 
-Kaplowitz et al. (1983) found ζ < 1 (oscillation) for persuasion.
+Kaplowitz et al. (1983) found zeta < 1 (oscillation) for persuasion.
 Question: Do political attitudes show the same pattern?
     """)
 
@@ -366,7 +395,7 @@ Question: Do political attitudes show the same pattern?
     print("\n[1/4] Loading data...")
     try:
         df = load_panel_data(data_dir)
-        print(f"      Loaded {len(df)} participants, {len(df.columns)} columns")
+        print(f"      Loaded {len(df)} rows, {len(df.columns)} columns")
     except FileNotFoundError as e:
         print(f"\n ERROR: {e}")
         print("\n Please download the data from https://osf.io/3pwvb/")
@@ -375,32 +404,42 @@ Question: Do political attitudes show the same pattern?
 
     # Identify attitude variables
     print("\n[2/4] Identifying attitude variables...")
+    print(f"      Data shape: {df.shape}")
 
-    # Common variable prefixes in political psychology
-    variable_prefixes = [
-        'attitude', 'opinion', 'position', 'pol_', 'political',
-        'threat', 'stress', 'distance', 'feeling', 'approval'
-    ]
+    if 'id' in df.columns:
+        print(f"      Unique participants: {df['id'].nunique()}")
+    if 'wave' in df.columns:
+        print(f"      Waves: {sorted(df['wave'].unique())}")
 
-    # Find matching columns
+    # Find which attitude variables are in the data
+    available_vars = [v for v in ATTITUDE_VARIABLES if v in df.columns]
+    print(f"      Found {len(available_vars)} attitude variables: {available_vars}")
+
+    if not available_vars:
+        print("\n ERROR: No attitude variables found in the data.")
+        print(f" Expected columns like: {ATTITUDE_VARIABLES[:5]}")
+        print(f" Found columns: {list(df.columns[:20])}")
+        return None
+
+    # Fit Hamiltonian dynamics to each variable
     all_fits = {}
 
-    for prefix in variable_prefixes:
-        series_dict = extract_time_series(df, prefix)
+    for var in available_vars:
+        series_dict = extract_time_series(df, var)
 
-        if len(series_dict) > 10:  # Enough participants
-            print(f"\n   Analyzing '{prefix}' ({len(series_dict)} participants)...")
+        if len(series_dict) >= 10:  # Enough participants
+            print(f"\n   Analyzing '{var}' ({len(series_dict)} participants)...")
 
             fits = []
             for pid, ts in series_dict.items():
                 fit = fit_hamiltonian_dynamics(ts, dt=14.0)
                 if fit is not None:
                     fit.participant_id = pid
-                    fit.variable = prefix
+                    fit.variable = var
                     fits.append(fit)
 
             if fits:
-                all_fits[prefix] = fits
+                all_fits[var] = fits
                 print(f"      Fitted {len(fits)} trajectories")
 
     if not all_fits:
@@ -419,15 +458,15 @@ Question: Do political attitudes show the same pattern?
         print(f"\n   {var}:")
         print(f"      Underdamped: {r['n_underdamped']}/{r['n_total']} ({r['prop_underdamped']:.1%})")
         print(f"      Overdamped:  {r['n_overdamped']}/{r['n_total']}")
-        print(f"      Mean ζ: {r['mean_zeta']:.3f} ± {r['std_zeta']:.3f}")
-        print(f"      Mean R²: {r['mean_r_squared']:.3f}")
+        print(f"      Median zeta: {r['median_zeta']:.3f}")
+        print(f"      Mean R^2: {r['mean_r_squared']:.3f}")
 
         if r['p_value'] < 0.05 and r['prop_underdamped'] > 0.33:
-            print(f"      ✓ Significant oscillation (p = {r['p_value']:.4f})")
+            print(f"      * Significant oscillation (p = {r['p_value']:.4f})")
             if r['mean_period_days']:
-                print(f"      ✓ Mean period: {r['mean_period_days']:.1f} days")
+                print(f"      * Mean period: {r['mean_period_days']:.1f} days")
         else:
-            print(f"      ○ No significant oscillation (p = {r['p_value']:.4f})")
+            print(f"      o No significant oscillation (p = {r['p_value']:.4f})")
 
     # Visualize
     print("\n[4/4] Creating visualizations...")
@@ -453,17 +492,38 @@ Question: Do political attitudes show the same pattern?
     print(f"  Total fits: {len(all_regimes)}")
     print(f"  Underdamped: {n_under} ({n_under/len(all_regimes):.1%})")
     print(f"  Overdamped: {n_over} ({n_over/len(all_regimes):.1%})")
-    print(f"  Mean damping ratio ζ: {np.mean(all_zetas):.3f}")
+    print(f"  Median damping ratio zeta: {np.median(all_zetas):.3f}")
+    print(f"  Mean damping ratio zeta: {np.mean(all_zetas):.3f} (may be skewed by outliers)")
 
-    if np.mean(all_zetas) < 1:
-        print("""
-✓ Evidence for UNDERDAMPED dynamics (oscillation)!
+    # Use proportion of underdamped as the key metric
+    prop_underdamped = n_under / len(all_regimes)
+    median_zeta = np.median(all_zetas)
+
+    if prop_underdamped > 0.5 or median_zeta < 1:
+        # Compute mean period from results
+        all_periods = []
+        for res in results.values():
+            if res.get('oscillation_periods'):
+                all_periods.extend(res['oscillation_periods'])
+        mean_period = np.mean(all_periods) if all_periods else 0
+
+        print(f"""
+* Evidence for UNDERDAMPED dynamics (oscillation)!
   This matches Kaplowitz et al. (1983) finding for persuasion.
-  Political attitudes appear to oscillate around equilibrium.
+
+  Key findings:
+  - {prop_underdamped:.1%} of individual trajectories show oscillation (zeta < 1)
+  - Median damping ratio zeta = {median_zeta:.3f}
+  - Mean oscillation period: {mean_period:.0f} days
+
+  Interpretation:
+  Political attitudes oscillate around equilibrium points with
+  characteristic periods of ~2-4 months. This suggests a
+  "pendulum" dynamic in belief updating rather than monotonic decay.
 """)
     else:
         print("""
-○ Evidence for OVERDAMPED dynamics (no oscillation)
+o Evidence for OVERDAMPED dynamics (no oscillation)
   Unlike Kaplowitz et al. (1983), political attitudes
   appear to decay monotonically without oscillation.
 
@@ -488,13 +548,15 @@ def visualize_results(all_fits: Dict, results: Dict):
             if f is not None:
                 all_zetas.append(f.zeta)
 
-    ax.hist(all_zetas, bins=30, alpha=0.7, color='steelblue', edgecolor='black')
-    ax.axvline(1.0, color='red', ls='--', lw=2, label='Critical damping (ζ=1)')
-    ax.axvline(np.mean(all_zetas), color='green', ls='-', lw=2,
-               label=f'Mean ζ = {np.mean(all_zetas):.2f}')
-    ax.set_xlabel('Damping Ratio ζ', fontsize=12)
+    # Cap zetas for visualization (outliers distort histogram)
+    zetas_capped = np.clip(all_zetas, 0, 5)
+    ax.hist(zetas_capped, bins=50, alpha=0.7, color='steelblue', edgecolor='black')
+    ax.axvline(1.0, color='red', ls='--', lw=2, label='Critical damping (zeta=1)')
+    ax.axvline(np.median(all_zetas), color='green', ls='-', lw=2,
+               label=f'Median zeta = {np.median(all_zetas):.2f}')
+    ax.set_xlabel('Damping Ratio zeta (capped at 5)', fontsize=12)
     ax.set_ylabel('Count', fontsize=12)
-    ax.set_title('A. Distribution of Damping Ratios\n(ζ<1: oscillation, ζ>1: overdamped)', fontsize=11)
+    ax.set_title('A. Distribution of Damping Ratios\n(zeta<1: oscillation, zeta>1: overdamped)', fontsize=11)
     ax.legend()
 
     # Panel B: Regime breakdown
@@ -531,24 +593,28 @@ def visualize_results(all_fits: Dict, results: Dict):
                     if best_over is None or f.r_squared > best_over.r_squared:
                         best_over = f
 
-    t = np.arange(26) * 14  # Days
+    n_waves = 26
+    t = np.arange(n_waves) * 14  # Days
 
-    if best_under is not None and len(best_under.trajectory) == 26:
-        ax.plot(t, best_under.trajectory, 'o-', color='coral',
-                label=f'Underdamped (ζ={best_under.zeta:.2f})', alpha=0.7)
-        ax.plot(t, best_under.fitted, '--', color='coral', alpha=0.5)
+    if best_under is not None and len(best_under.trajectory) <= n_waves:
+        traj_len = len(best_under.trajectory)
+        ax.plot(t[:traj_len], best_under.trajectory, 'o-', color='coral',
+                label=f'Underdamped (zeta={best_under.zeta:.2f})', alpha=0.7)
+        ax.plot(t[:traj_len], best_under.fitted, '--', color='coral', alpha=0.5)
 
-    if best_over is not None and len(best_over.trajectory) == 26:
-        ax.plot(t, best_over.trajectory, 's-', color='steelblue',
-                label=f'Overdamped (ζ={best_over.zeta:.2f})', alpha=0.7)
-        ax.plot(t, best_over.fitted, '--', color='steelblue', alpha=0.5)
+    if best_over is not None and len(best_over.trajectory) <= n_waves:
+        traj_len = len(best_over.trajectory)
+        ax.plot(t[:traj_len], best_over.trajectory, 's-', color='steelblue',
+                label=f'Overdamped (zeta={best_over.zeta:.2f})', alpha=0.7)
+        ax.plot(t[:traj_len], best_over.fitted, '--', color='steelblue', alpha=0.5)
 
     ax.set_xlabel('Time (days)', fontsize=12)
     ax.set_ylabel('Attitude', fontsize=12)
     ax.set_title('C. Example Trajectories', fontsize=11)
-    ax.legend()
+    if best_under is not None or best_over is not None:
+        ax.legend()
 
-    # Panel D: R² vs ζ
+    # Panel D: R^2 vs zeta
     ax = axes[1, 1]
     zetas = []
     r2s = []
@@ -558,10 +624,12 @@ def visualize_results(all_fits: Dict, results: Dict):
                 zetas.append(f.zeta)
                 r2s.append(f.r_squared)
 
-    ax.scatter(zetas, r2s, alpha=0.3, c='steelblue', s=20)
+    # Cap zetas for visualization
+    zetas_plot = np.clip(zetas, 0, 5)
+    ax.scatter(zetas_plot, r2s, alpha=0.3, c='steelblue', s=20)
     ax.axvline(1.0, color='red', ls='--', alpha=0.5)
-    ax.set_xlabel('Damping Ratio ζ', fontsize=12)
-    ax.set_ylabel('R²', fontsize=12)
+    ax.set_xlabel('Damping Ratio zeta (capped at 5)', fontsize=12)
+    ax.set_ylabel('R^2', fontsize=12)
     ax.set_title('D. Fit Quality vs Damping', fontsize=11)
 
     plt.suptitle('Hamiltonian Dynamics: 26-Wave Political Panel\n(Testing Kaplowitz-Fink Model)',

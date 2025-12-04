@@ -67,7 +67,16 @@ class EventDynamics:
 
 
 def load_election_data(data_dir: str) -> pd.DataFrame:
-    """Load the IEEE DataPort election dataset."""
+    """
+    Load the sentiment data from various possible locations.
+
+    Searches for:
+    1. Direct CSV files in the data directory
+    2. "Sentiment Data - XXX" folders (Country, County, State, World)
+    """
+    import glob as glob_module
+
+    # Direct file names to try
     possible_files = [
         'election2020_tweets.csv',
         'USA_Nov2020_Election_Tweets.csv',
@@ -75,44 +84,145 @@ def load_election_data(data_dir: str) -> pd.DataFrame:
         'data.csv',
     ]
 
+    # Check direct files first
     for fname in possible_files:
         fpath = os.path.join(data_dir, fname)
         if os.path.exists(fpath):
             print(f"Loading data from: {fname}")
-            # Load in chunks for large file
-            chunks = []
-            for chunk in pd.read_csv(fpath, chunksize=500000,
-                                     low_memory=False,
-                                     on_bad_lines='skip'):
-                chunks.append(chunk)
-            df = pd.concat(chunks, ignore_index=True)
-            print(f"  Loaded {len(df):,} tweets")
-            return df
+            return _load_csv_file(fpath)
+
+    # Search for "Sentiment Data - XXX" folders
+    # Look in current dir, parent dir, and common locations
+    search_paths = [
+        data_dir,
+        os.path.join(data_dir, '..'),
+        os.path.join(data_dir, '..', '..'),
+        os.path.join(data_dir, '..', '..', '..'),
+    ]
+
+    for search_path in search_paths:
+        # Look for sentiment data folders
+        pattern = os.path.join(search_path, 'Sentiment Data - *')
+        sentiment_folders = glob_module.glob(pattern)
+
+        if sentiment_folders:
+            print(f"Found {len(sentiment_folders)} sentiment data folders:")
+            for folder in sentiment_folders:
+                print(f"  - {os.path.basename(folder)}")
+
+            # Load from the first folder that has CSV files
+            all_dfs = []
+            for folder in sentiment_folders:
+                csv_files = glob_module.glob(os.path.join(folder, '*.csv'))
+                if csv_files:
+                    print(f"\nLoading from: {os.path.basename(folder)}")
+                    for csv_file in csv_files[:5]:  # Limit to first 5 files per folder
+                        try:
+                            df = _load_csv_file(csv_file)
+                            if df is not None and len(df) > 0:
+                                all_dfs.append(df)
+                                print(f"  Loaded {len(df):,} rows from {os.path.basename(csv_file)}")
+                        except Exception as e:
+                            print(f"  Error loading {os.path.basename(csv_file)}: {e}")
+
+            if all_dfs:
+                combined = pd.concat(all_dfs, ignore_index=True)
+                print(f"\nTotal: {len(combined):,} rows from {len(all_dfs)} files")
+                return combined
+
+    # Search recursively for any CSV with sentiment-related name
+    for search_path in search_paths:
+        csv_files = glob_module.glob(os.path.join(search_path, '**', '*sentiment*.csv'), recursive=True)
+        csv_files += glob_module.glob(os.path.join(search_path, '**', '*election*.csv'), recursive=True)
+
+        if csv_files:
+            print(f"Found {len(csv_files)} potential sentiment files")
+            fpath = csv_files[0]
+            print(f"Loading from: {fpath}")
+            return _load_csv_file(fpath)
 
     raise FileNotFoundError(
         f"No data file found in {data_dir}. "
-        f"Please download from IEEE DataPort."
+        f"Please place sentiment data in 'Sentiment Data - XXX' folders."
     )
 
 
-def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Preprocess the election data."""
-    # Standardize column names
-    df.columns = df.columns.str.lower().str.replace('-', '_')
+def _load_csv_file(fpath: str) -> pd.DataFrame:
+    """Load a CSV file, handling large files with chunking."""
+    file_size = os.path.getsize(fpath)
 
-    # Parse timestamp
-    time_cols = ['created_at', 'createdat', 'timestamp', 'date']
+    if file_size > 100_000_000:  # > 100MB, use chunking
+        print(f"  Large file ({file_size / 1e6:.1f} MB), loading in chunks...")
+        chunks = []
+        for chunk in pd.read_csv(fpath, chunksize=500000,
+                                 low_memory=False,
+                                 on_bad_lines='skip'):
+            chunks.append(chunk)
+        df = pd.concat(chunks, ignore_index=True)
+    else:
+        df = pd.read_csv(fpath, low_memory=False, on_bad_lines='skip')
+
+    return df
+
+
+def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Preprocess the election/sentiment data."""
+    print(f"  Raw columns: {list(df.columns[:10])}...")
+
+    # Standardize column names
+    df.columns = df.columns.str.lower().str.strip().str.replace('-', '_').str.replace(' ', '_')
+
+    print(f"  Standardized columns: {list(df.columns[:10])}...")
+
+    # Parse timestamp - try many possible column names
+    time_cols = ['created_at', 'createdat', 'timestamp', 'date', 'time', 'datetime',
+                 'day', 'tweet_date', 'post_date', 'created', 'posted_at']
+    timestamp_found = False
     for col in time_cols:
         if col in df.columns:
             df['timestamp'] = pd.to_datetime(df[col], errors='coerce')
+            timestamp_found = True
+            print(f"  Using '{col}' as timestamp")
             break
 
-    # Find sentiment column
-    sent_cols = ['score', 'sentiment', 'sentiment_score', 'compound']
+    if not timestamp_found:
+        # Try to find any column with 'date' or 'time' in the name
+        for col in df.columns:
+            if 'date' in col or 'time' in col:
+                df['timestamp'] = pd.to_datetime(df[col], errors='coerce')
+                timestamp_found = True
+                print(f"  Using '{col}' as timestamp")
+                break
+
+    # Find sentiment column - try many possible names
+    sent_cols = ['score', 'sentiment', 'sentiment_score', 'compound', 'polarity',
+                 'vader', 'vader_score', 'sentiment_compound', 'avg_sentiment',
+                 'mean_sentiment', 'daily_sentiment']
+    sentiment_found = False
     for col in sent_cols:
         if col in df.columns:
             df['sentiment'] = pd.to_numeric(df[col], errors='coerce')
+            sentiment_found = True
+            print(f"  Using '{col}' as sentiment")
             break
+
+    if not sentiment_found:
+        # Try to find any column with 'sent' or 'score' in the name
+        for col in df.columns:
+            if 'sent' in col or 'score' in col or 'polarity' in col:
+                df['sentiment'] = pd.to_numeric(df[col], errors='coerce')
+                sentiment_found = True
+                print(f"  Using '{col}' as sentiment")
+                break
+
+    if not timestamp_found or not sentiment_found:
+        print(f"  WARNING: Could not find required columns")
+        print(f"  Available columns: {list(df.columns)}")
+        if not timestamp_found:
+            print(f"  Missing: timestamp column")
+        if not sentiment_found:
+            print(f"  Missing: sentiment column")
+        return pd.DataFrame()
 
     # Drop rows with missing values
     df = df.dropna(subset=['timestamp', 'sentiment'])
@@ -120,8 +230,10 @@ def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
     # Sort by time
     df = df.sort_values('timestamp').reset_index(drop=True)
 
-    print(f"  After preprocessing: {len(df):,} tweets")
-    print(f"  Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
+    print(f"  After preprocessing: {len(df):,} rows")
+    if len(df) > 0:
+        print(f"  Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
+        print(f"  Sentiment range: {df['sentiment'].min():.3f} to {df['sentiment'].max():.3f}")
 
     return df
 
