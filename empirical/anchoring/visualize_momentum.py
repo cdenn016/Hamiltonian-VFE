@@ -147,16 +147,30 @@ def extract_trial_data(df):
 
 
 def plot_momentum_scatter(mom_df, ax):
-    """Scatter plot of update[t] vs update[t+1]."""
-    # Subsample for visualization
-    sample = mom_df.sample(n=min(5000, len(mom_df)), random_state=42)
+    """Scatter plot of update[t] vs update[t+1] - using bubble sizes for counts."""
+    # Count occurrences at each (update_t, update_t1) pair
+    counts = mom_df.groupby(['update_t', 'update_t1']).size().reset_index(name='count')
 
-    ax.scatter(sample['update_t'], sample['update_t1'],
-               alpha=0.1, s=10, c='steelblue')
+    # Scale bubble sizes (sqrt for area scaling)
+    max_count = counts['count'].max()
+    sizes = (counts['count'] / max_count) * 2000  # Scale to reasonable size
+
+    # Color by count
+    scatter = ax.scatter(counts['update_t'], counts['update_t1'],
+                        s=sizes, c=counts['count'], cmap='Blues',
+                        alpha=0.7, edgecolors='darkblue', linewidths=1)
+
+    # Add count labels
+    for _, row in counts.iterrows():
+        if row['count'] > 1000:  # Only label large bubbles
+            ax.annotate(f"{row['count']//1000}k",
+                       (row['update_t'], row['update_t1']),
+                       ha='center', va='center', fontsize=7, color='white',
+                       fontweight='bold')
 
     # Fit line
     slope, intercept, r, p, se = stats.linregress(mom_df['update_t'], mom_df['update_t1'])
-    x_line = np.array([-2, 2])
+    x_line = np.array([-1.5, 1.5])
     ax.plot(x_line, intercept + slope * x_line, 'r-', linewidth=2,
             label=f'r = {r:.3f}')
 
@@ -167,8 +181,8 @@ def plot_momentum_scatter(mom_df, ax):
     ax.set_ylabel('Update at time t+1')
     ax.set_title('Belief Momentum: Updates Persist')
     ax.legend(loc='upper left')
-    ax.set_xlim(-2.5, 2.5)
-    ax.set_ylim(-2.5, 2.5)
+    ax.set_xlim(-1.8, 1.8)
+    ax.set_ylim(-1.8, 1.8)
 
 
 def plot_momentum_heatmap(mom_df, ax):
