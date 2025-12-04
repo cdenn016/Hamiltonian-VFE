@@ -611,23 +611,41 @@ def run_changepoint_analysis():
         print(f"\nStatic sensory precision 1/σ² (single obs):")
         print(f"  τ ~ 1/σ²: r = {r_static:.3f} (p = {p_static:.3f})")
 
-    # Test total mass M = Λ_p + n/σ²
+    # Test total precision Λ = Λ_p + Λ_o (not just n/σ² which ignores prior)
+    print("\n" + "-"*40)
+    print("Does τ collapse onto a curve against Λ?")
+    print("-"*40)
+
     for method in ['inverse_variance', 'bayesian']:
         masses = []
         taus_for_mass = []
+        lambda_os_only = []
+
         for cp in all_cp_results:
             if (cp['total_mass'] is not None and
                 cp['total_mass'].get(method) is not None and
-                cp['tau'] is not None):
+                cp['tau'] is not None and
+                cp['lambda_o'] is not None):
                 masses.append(cp['total_mass'][method])
                 taus_for_mass.append(cp['tau'])
+                lambda_os_only.append(cp['lambda_o'])
 
         if len(masses) > 10:
-            r_mass, p_mass = stats.spearmanr(masses, taus_for_mass)
-            print(f"\nTotal mass M = Λ_p({method[:7]}) + n/σ²:")
-            print(f"  τ ~ M: r = {r_mass:.3f} (p = {p_mass:.3f})")
-            if p_mass < 0.05 and r_mass > 0:
-                print(f"  ✓ SUPPORTS τ = M/γ prediction!")
+            r_total, p_total = stats.spearmanr(masses, taus_for_mass)
+            r_obs_only, p_obs = stats.spearmanr(lambda_os_only, taus_for_mass)
+
+            print(f"\n{method} method:")
+            print(f"  τ ~ Λ (total = Λ_p + Λ_o): r = {r_total:.3f} (p = {p_total:.3f})")
+            print(f"  τ ~ Λ_o only (n/σ²):       r = {r_obs_only:.3f} (p = {p_obs:.3f})")
+
+            # Check if total Λ explains more variance than Λ_o alone
+            if abs(r_total) > abs(r_obs_only):
+                print(f"  → Total Λ is better predictor (Λ_p matters!)")
+            else:
+                print(f"  → Λ_o alone is sufficient (Λ_p ≈ negligible or constant)")
+
+            if p_total < 0.05:
+                print(f"  ✓ τ DOES depend systematically on Λ")
 
     print("\n" + "="*70)
 
