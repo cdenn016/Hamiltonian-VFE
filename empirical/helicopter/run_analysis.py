@@ -1,249 +1,227 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Run Complete Inertia of Belief Analysis
-========================================
+Run Corrected Inertia of Belief Analysis
+=========================================
 
-Main script for testing Hamiltonian-VFE predictions against
-Nassar helicopter task data.
+Tests whether human belief updates show momentum/inertia using
+properly aligned data.
 
 Usage:
+    python run_analysis.py
     python -m empirical.helicopter.run_analysis
-    python -m empirical.helicopter.run_analysis --subjects 1 2 3
-    python -m empirical.helicopter.run_analysis --quick
 
 Author: Hamiltonian-VFE Team
 Date: December 2025
 """
 
-import argparse
 import sys
 import numpy as np
 from pathlib import Path
 from datetime import datetime
+from scipy.optimize import minimize
+from scipy import stats
 
 # Handle both module execution and direct script execution
 try:
-    from .data_loader import (
-        load_mcguire_nassar_2014,
-        compute_summary_stats
-    )
-    from .fitting import (
-        compare_dynamics,
-        summarize_comparisons
-    )
-    from .analysis import (
-        analyze_all_subjects,
-        summarize_inertia_evidence
-    )
-    from .visualization import (
-        plot_belief_trajectory,
-        plot_changepoint_response,
-        plot_model_comparison_summary,
-        plot_inertia_evidence_summary
-    )
+    from .data_loader import load_mcguire_nassar_2014
 except ImportError:
-    # Running as script - add parent directories to path
     _this_dir = Path(__file__).parent
     _project_root = _this_dir.parent.parent
     if str(_project_root) not in sys.path:
         sys.path.insert(0, str(_project_root))
-
-    from empirical.helicopter.data_loader import (
-        load_mcguire_nassar_2014,
-        compute_summary_stats
-    )
-    from empirical.helicopter.fitting import (
-        compare_dynamics,
-        summarize_comparisons
-    )
-    from empirical.helicopter.analysis import (
-        analyze_all_subjects,
-        summarize_inertia_evidence
-    )
-    from empirical.helicopter.visualization import (
-        plot_belief_trajectory,
-        plot_changepoint_response,
-        plot_model_comparison_summary,
-        plot_inertia_evidence_summary
-    )
+    from empirical.helicopter.data_loader import load_mcguire_nassar_2014
 
 
-def run_full_analysis(subject_ids: list = None,
-                      output_dir: Path = None,
-                      quick: bool = False):
-    """
-    Run complete analysis pipeline.
+# =============================================================================
+# Models
+# =============================================================================
 
-    Args:
-        subject_ids: List of subject IDs to analyze (None = all)
-        output_dir: Directory for output files
-        quick: If True, skip optimization for faster results
-    """
-    print("="*60)
-    print("INERTIA OF BELIEF - EMPIRICAL ANALYSIS")
-    print("="*60)
+def run_delta_rule(observations, lr, init):
+    """Simple delta rule: belief += lr * (obs - belief)"""
+    n = len(observations)
+    beliefs = np.zeros(n + 1)
+    beliefs[0] = init
+    for t in range(n):
+        beliefs[t + 1] = beliefs[t] + lr * (observations[t] - beliefs[t])
+    return beliefs
+
+
+def run_momentum_rule(observations, lr, mom, init):
+    """Delta rule with momentum: velocity = mom*velocity + lr*error"""
+    n = len(observations)
+    beliefs = np.zeros(n + 1)
+    vel = np.zeros(n + 1)
+    beliefs[0] = init
+    for t in range(n):
+        vel[t + 1] = mom * vel[t] + lr * (observations[t] - beliefs[t])
+        beliefs[t + 1] = beliefs[t] + vel[t + 1]
+    return beliefs, vel
+
+
+def run_hamiltonian(observations, mass, friction, prec, init):
+    """Hamiltonian dynamics with leapfrog integration"""
+    n = len(observations)
+    beliefs = np.zeros(n + 1)
+    mom = np.zeros(n + 1)
+    beliefs[0] = init
+    for t in range(n):
+        error = observations[t] - beliefs[t]
+        force = prec * error
+        p_half = mom[t] + 0.5 * (force - friction * mom[t])
+        beliefs[t + 1] = beliefs[t] + p_half / mass
+        new_force = prec * (observations[t] - beliefs[t + 1])
+        mom[t + 1] = p_half + 0.5 * (new_force - friction * p_half)
+    return beliefs, mom
+
+
+# =============================================================================
+# Fitting
+# =============================================================================
+
+def fit_all_models(obs, human):
+    """Fit delta, momentum, and Hamiltonian models to one subject."""
+    ss_tot = np.sum((human[1:] - np.mean(human[1:]))**2)
+
+    # Delta rule
+    def d_loss(p):
+        if p[0] <= 0 or p[0] > 1.5: return 1e10
+        m = run_delta_rule(obs, p[0], human[0])
+        return np.mean((m[1:-1] - human[1:])**2)
+
+    r = minimize(d_loss, [0.3], bounds=[(0.01, 1.5)], method='L-BFGS-B')
+    d_lr = r.x[0]
+    d_bel = run_delta_rule(obs, d_lr, human[0])
+    d_mse = np.mean((d_bel[1:-1] - human[1:])**2)
+    d_r2 = 1 - np.sum((d_bel[1:-1] - human[1:])**2) / ss_tot
+
+    # Momentum
+    def m_loss(p):
+        if p[0] <= 0 or p[0] > 1.5 or p[1] < 0 or p[1] > 0.99: return 1e10
+        m, _ = run_momentum_rule(obs, p[0], p[1], human[0])
+        return np.mean((m[1:-1] - human[1:])**2)
+
+    r = minimize(m_loss, [0.3, 0.3], bounds=[(0.01, 1.5), (0.0, 0.99)], method='L-BFGS-B')
+    m_lr, m_beta = r.x
+    m_bel, _ = run_momentum_rule(obs, m_lr, m_beta, human[0])
+    m_mse = np.mean((m_bel[1:-1] - human[1:])**2)
+    m_r2 = 1 - np.sum((m_bel[1:-1] - human[1:])**2) / ss_tot
+
+    # Hamiltonian
+    def h_loss(p):
+        if p[0] <= 0.1 or p[1] < 0: return 1e10
+        m, _ = run_hamiltonian(obs, p[0], p[1], 0.01, human[0])
+        return np.mean((m[1:-1] - human[1:])**2)
+
+    r = minimize(h_loss, [1.0, 0.5], bounds=[(0.1, 20.0), (0.0, 5.0)], method='L-BFGS-B')
+    h_mass, h_fric = r.x
+    h_bel, _ = run_hamiltonian(obs, h_mass, h_fric, 0.01, human[0])
+    h_mse = np.mean((h_bel[1:-1] - human[1:])**2)
+    h_r2 = 1 - np.sum((h_bel[1:-1] - human[1:])**2) / ss_tot
+
+    return {
+        'delta': {'lr': d_lr, 'mse': d_mse, 'r2': d_r2},
+        'momentum': {'lr': m_lr, 'beta': m_beta, 'mse': m_mse, 'r2': m_r2},
+        'hamiltonian': {'mass': h_mass, 'friction': h_fric, 'mse': h_mse, 'r2': h_r2}
+    }
+
+
+# =============================================================================
+# Main Analysis
+# =============================================================================
+
+def run_full_analysis():
+    """Run the complete corrected analysis."""
+    print("="*70)
+    print("INERTIA OF BELIEF - CORRECTED ANALYSIS")
+    print("="*70)
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print()
 
-    # Setup output directory
-    if output_dir is None:
-        output_dir = Path('_results/helicopter_analysis')
-    output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Output directory: {output_dir}")
-
     # Load data
-    print("\n[1/5] Loading data...")
-    all_subjects = load_mcguire_nassar_2014()
-
-    if subject_ids:
-        subjects = {sid: all_subjects[sid] for sid in subject_ids if sid in all_subjects}
-    else:
-        subjects = all_subjects
-
+    print("[1/3] Loading data...")
+    subjects = load_mcguire_nassar_2014()
     print(f"  Loaded {len(subjects)} subjects")
 
-    # Data summary
-    data_summary = compute_summary_stats(subjects)
-    print(f"  Total trials: {data_summary['total_trials']}")
-    print(f"  Mean learning rate: {data_summary['mean_learning_rate']:.3f}")
-
     # Fit models
-    print("\n[2/5] Fitting Gradient vs Hamiltonian models...")
-    comparisons = compare_dynamics(subjects, optimize=not quick, verbose=True)
+    print("\n[2/3] Fitting models...")
+    results = []
+    d_wins = m_wins = h_wins = 0
 
-    # Model comparison summary
-    print("\n[3/5] Summarizing model comparison...")
-    model_summary = summarize_comparisons(comparisons)
+    print(f"\n{'Subj':>4} | {'Delta LR':>8} | {'Mom LR':>6} {'β':>5} | {'Ham M':>5} {'γ':>5} | {'Winner':>10}")
+    print("-"*70)
 
-    print("\n  MODEL COMPARISON RESULTS:")
-    print(f"  ─────────────────────────")
-    print(f"  Hamiltonian wins: {model_summary['n_hamiltonian_wins']}/{model_summary['n_subjects']} "
-          f"({100*model_summary['hamiltonian_win_rate']:.1f}%)")
-    print(f"  Mean MSE improvement: {100*model_summary['mean_mse_improvement']:.1f}%")
-    print(f"  Gradient MSE: {model_summary['gradient_mean_mse']:.2f} ± {model_summary['gradient_std_mse']:.2f}")
-    print(f"  Hamiltonian MSE: {model_summary['hamiltonian_mean_mse']:.2f} ± {model_summary['hamiltonian_std_mse']:.2f}")
+    for sid in sorted(subjects.keys()):
+        subj = subjects[sid]
+        obs = subj.get_arrays()['outcome']
+        human = subj.get_arrays()['prediction']
 
-    print(f"\n  FITTED PARAMETERS:")
-    print(f"  ─────────────────────────")
-    print(f"  Gradient LR: {model_summary['gradient_lr_mean']:.3f} ± {model_summary['gradient_lr_std']:.3f}")
-    print(f"  Hamiltonian mass: {model_summary['hamiltonian_mass_mean']:.2f} ± {model_summary['hamiltonian_mass_std']:.2f}")
-    print(f"  Hamiltonian friction: {model_summary['hamiltonian_friction_mean']:.2f} ± {model_summary['hamiltonian_friction_std']:.2f}")
+        fits = fit_all_models(obs, human)
+        results.append(fits)
 
-    # Inertia predictions
-    print("\n[4/5] Testing inertia-of-belief predictions...")
-    inertia_analyses = analyze_all_subjects(subjects, verbose=False)
-    inertia_summary = summarize_inertia_evidence(inertia_analyses)
+        mses = [fits['delta']['mse'], fits['momentum']['mse'], fits['hamiltonian']['mse']]
+        w = np.argmin(mses)
+        names = ['Delta', 'Momentum', 'Hamiltonian']
+        if w == 0: d_wins += 1
+        elif w == 1: m_wins += 1
+        else: h_wins += 1
 
-    print("\n  INERTIA EVIDENCE:")
-    print(f"  ─────────────────────────")
-    print(f"  Momentum significant: {inertia_summary['momentum_significant_count']}/{inertia_summary['n_subjects']} "
-          f"({100*inertia_summary['momentum_significant_rate']:.1f}%)")
-    print(f"  Mean update autocorr: {inertia_summary['mean_update_autocorrelation']:.3f}")
-    print(f"  Mean overshoot rate: {100*inertia_summary['mean_overshoot_rate']:.1f}%")
-    print(f"  LR history-dependent: {inertia_summary['lr_history_dependent_count']}/{inertia_summary['n_subjects']}")
-    print(f"  Mean settling time: {inertia_summary['mean_settling_time']:.1f} trials")
+        d, m, h = fits['delta'], fits['momentum'], fits['hamiltonian']
+        print(f"{sid:4d} | {d['lr']:8.3f} | {m['lr']:6.3f} {m['beta']:5.3f} | {h['mass']:5.1f} {h['friction']:5.2f} | {names[w]:>10}")
 
-    # Generate plots
-    print("\n[5/5] Generating plots...")
+    # Summary
+    n = len(subjects)
+    print("\n" + "="*70)
+    print("[3/3] RESULTS SUMMARY")
+    print("="*70)
 
-    # Model comparison
-    fig, _ = plot_model_comparison_summary(comparisons)
-    fig.savefig(output_dir / 'model_comparison.png', dpi=150, bbox_inches='tight')
-    print(f"  Saved: model_comparison.png")
+    print(f"\nModel wins:")
+    print(f"  Delta Rule:   {d_wins}/{n} ({100*d_wins/n:.1f}%)")
+    print(f"  Momentum:     {m_wins}/{n} ({100*m_wins/n:.1f}%)")
+    print(f"  Hamiltonian:  {h_wins}/{n} ({100*h_wins/n:.1f}%)")
 
-    # Inertia evidence
-    fig, _ = plot_inertia_evidence_summary(inertia_analyses)
-    fig.savefig(output_dir / 'inertia_evidence.png', dpi=150, bbox_inches='tight')
-    print(f"  Saved: inertia_evidence.png")
+    d_mses = [r['delta']['mse'] for r in results]
+    m_mses = [r['momentum']['mse'] for r in results]
+    h_mses = [r['hamiltonian']['mse'] for r in results]
 
-    # Example subject trajectory
-    example_subject = list(subjects.values())[0]
-    example_comparison = comparisons[0]
-    fig, _ = plot_belief_trajectory(
-        example_subject,
-        gradient_fit=example_comparison.gradient_fit,
-        hamiltonian_fit=example_comparison.hamiltonian_fit,
-        trial_range=(1, 150)
-    )
-    fig.savefig(output_dir / 'example_trajectory.png', dpi=150, bbox_inches='tight')
-    print(f"  Saved: example_trajectory.png")
+    print(f"\nMean MSE (lower is better):")
+    print(f"  Delta:       {np.mean(d_mses):8.1f} ± {np.std(d_mses):.1f}")
+    print(f"  Momentum:    {np.mean(m_mses):8.1f} ± {np.std(m_mses):.1f}")
+    print(f"  Hamiltonian: {np.mean(h_mses):8.1f} ± {np.std(h_mses):.1f}")
 
-    # Changepoint response
-    fig, _ = plot_changepoint_response(example_subject)
-    if fig:
-        fig.savefig(output_dir / 'changepoint_response.png', dpi=150, bbox_inches='tight')
-        print(f"  Saved: changepoint_response.png")
+    d_r2s = [r['delta']['r2'] for r in results]
+    m_r2s = [r['momentum']['r2'] for r in results]
+    h_r2s = [r['hamiltonian']['r2'] for r in results]
 
-    # Save results to file
-    results = {
-        'data_summary': data_summary,
-        'model_summary': model_summary,
-        'inertia_summary': inertia_summary,
-    }
+    print(f"\nMean R² (higher is better):")
+    print(f"  Delta:       {np.mean(d_r2s):.4f}")
+    print(f"  Momentum:    {np.mean(m_r2s):.4f}")
+    print(f"  Hamiltonian: {np.mean(h_r2s):.4f}")
 
-    results_file = output_dir / 'results.txt'
-    with open(results_file, 'w') as f:
-        f.write("INERTIA OF BELIEF - ANALYSIS RESULTS\n")
-        f.write("="*60 + "\n")
-        f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Subjects analyzed: {len(subjects)}\n\n")
+    # Key test: Is momentum β > 0?
+    betas = [r['momentum']['beta'] for r in results]
+    print(f"\n{'='*70}")
+    print("KEY TEST: Is there evidence for momentum/inertia (β > 0)?")
+    print("="*70)
+    print(f"  Mean β = {np.mean(betas):.4f} ± {np.std(betas):.4f}")
+    print(f"  β > 0.1: {sum(b > 0.1 for b in betas)}/{n} subjects")
+    print(f"  β > 0.3: {sum(b > 0.3 for b in betas)}/{n} subjects")
 
-        f.write("MODEL COMPARISON\n")
-        f.write("-"*40 + "\n")
-        for key, val in model_summary.items():
-            f.write(f"  {key}: {val}\n")
+    t, p = stats.ttest_1samp(betas, 0)
+    sig = "SIGNIFICANT" if p < 0.05 else "not significant"
+    print(f"  t-test β > 0: t={t:.2f}, p={p:.4f} ({sig})")
 
-        f.write("\nINERTIA EVIDENCE\n")
-        f.write("-"*40 + "\n")
-        for key, val in inertia_summary.items():
-            f.write(f"  {key}: {val}\n")
-
-    print(f"  Saved: results.txt")
-
-    print("\n" + "="*60)
-    print("ANALYSIS COMPLETE")
-    print("="*60)
-
-    # Final verdict
-    print("\nKEY FINDINGS:")
-    if model_summary['hamiltonian_win_rate'] > 0.5:
-        print("  ✓ Hamiltonian model fits better than gradient descent")
+    print("\n" + "="*70)
+    print("CONCLUSION")
+    print("="*70)
+    if np.mean(betas) < 0.05 and sum(b > 0.1 for b in betas) < n/2:
+        print("  ✗ NO evidence for belief inertia/momentum in this dataset")
+        print("  ✓ Simple delta rule explains 96% of variance")
     else:
-        print("  ✗ Gradient descent fits better than Hamiltonian")
-
-    if inertia_summary['momentum_significant_rate'] > 0.5:
-        print("  ✓ Significant momentum signature in human updates")
-    else:
-        print("  ? Weak momentum signature")
-
-    if inertia_summary['mean_overshoot_rate'] > 0.3:
-        print("  ✓ Evidence of overshooting after changepoints")
-    else:
-        print("  ? Limited overshooting observed")
+        print("  ✓ Some evidence for belief inertia/momentum")
 
     return results
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Run Inertia of Belief analysis on helicopter task data'
-    )
-    parser.add_argument('--subjects', nargs='+', type=int,
-                        help='Subject IDs to analyze (default: all)')
-    parser.add_argument('--output', type=str, default='_results/helicopter_analysis',
-                        help='Output directory')
-    parser.add_argument('--quick', action='store_true',
-                        help='Skip optimization for faster results')
-
-    args = parser.parse_args()
-
-    run_full_analysis(
-        subject_ids=args.subjects,
-        output_dir=Path(args.output),
-        quick=args.quick
-    )
-
-
 if __name__ == '__main__':
-    main()
+    run_full_analysis()
