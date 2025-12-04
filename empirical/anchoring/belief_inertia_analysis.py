@@ -19,12 +19,18 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 import warnings
+import os
 warnings.filterwarnings('ignore')
+
+# Get the directory where this script is located
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(SCRIPT_DIR, '..', 'belief_updates', 'data')
 
 
 def load_trust_data():
     """Load the social trust sampling data."""
-    df = pd.read_csv('/home/user/Hamiltonian-VFE/empirical/belief_updates/data/sampledata.csv')
+    data_path = os.path.join(DATA_DIR, 'sampledata.csv')
+    df = pd.read_csv(data_path)
     return df
 
 
