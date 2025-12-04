@@ -137,9 +137,30 @@ def load_election_data(data_dir: str) -> pd.DataFrame:
 
         if csv_files:
             print(f"Found {len(csv_files)} potential sentiment files")
-            fpath = csv_files[0]
-            print(f"Loading from: {fpath}")
-            return _load_csv_file(fpath)
+
+            # Prioritize 2020 files for election2020 analysis
+            files_2020 = [f for f in csv_files if '2020' in f]
+            if files_2020:
+                print(f"  Found {len(files_2020)} files with '2020' in name")
+                csv_files = files_2020
+            else:
+                # Load ALL files and let the date filtering handle it
+                print(f"  No 2020-specific files, loading all and filtering by date")
+
+            all_dfs = []
+            for fpath in csv_files:
+                try:
+                    df = _load_csv_file(fpath)
+                    if df is not None and len(df) > 0:
+                        all_dfs.append(df)
+                        print(f"  Loaded {len(df):,} rows from {os.path.basename(fpath)}")
+                except Exception as e:
+                    print(f"  Error loading {os.path.basename(fpath)}: {e}")
+
+            if all_dfs:
+                combined = pd.concat(all_dfs, ignore_index=True)
+                print(f"\nTotal: {len(combined):,} rows from {len(all_dfs)} files")
+                return combined
 
     raise FileNotFoundError(
         f"No data file found in {data_dir}. "
@@ -545,6 +566,20 @@ Prediction: Sentiment shows damped oscillation (ζ < 1) after shocks.
     try:
         df = load_election_data(DATA_DIR)
         df = preprocess_data(df)
+
+        # Filter to 2020 data for election analysis
+        if len(df) > 0 and 'timestamp' in df.columns:
+            df_2020 = df[(df['timestamp'] >= '2020-01-01') & (df['timestamp'] <= '2020-12-31')]
+            if len(df_2020) > 0:
+                print(f"  Filtered to 2020: {len(df_2020):,} rows")
+                df = df_2020
+            else:
+                print(f"  WARNING: No 2020 data found in loaded files")
+                print(f"  Available date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
+                # List available years
+                years = df['timestamp'].dt.year.unique()
+                print(f"  Available years: {sorted(years)}")
+
         ts = aggregate_sentiment_timeseries(df, freq='1H')
     except FileNotFoundError:
         print("\n  No data file found. Using sample data for demonstration...")
