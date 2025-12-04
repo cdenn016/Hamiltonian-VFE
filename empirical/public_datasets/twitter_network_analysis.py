@@ -242,7 +242,13 @@ def analyze_mass_relaxation_correlation(
     if len(common_users) < 10:
         return {
             'n_users': len(common_users),
-            'error': 'Not enough users with valid data'
+            'error': 'Not enough users with valid data',
+            'r_spearman': 0,
+            'p_spearman': 1.0,
+            'r_pearson': 0,
+            'p_pearson': 1.0,
+            'masses': [],
+            'taus': [],
         }
 
     masses = [social_mass[u] for u in common_users]
@@ -295,36 +301,35 @@ def generate_sample_network():
         degree_bonus = 0.1 * degree
         user_precisions[node] = base_precision + degree_bonus
 
-    # Generate opinion trajectories
-    for node in G.nodes():
-        precision = user_precisions[node]
-        noise_scale = 1.0 / np.sqrt(precision)
+    # Generate opinion trajectories with more variation
+    user_opinions = {node: np.random.randn() for node in G.nodes()}
 
-        # Initial opinion
-        opinion = np.random.randn()
+    for t in range(n_times):
+        new_opinions = {}
+        for node in G.nodes():
+            precision = user_precisions[node]
+            # Lower precision = more noise = more variation
+            noise_scale = 1.0 / np.sqrt(max(precision, 0.1))
 
-        for t in range(n_times):
             # Influence from neighbors
-            neighbors = list(G.predecessors(node))
+            neighbors = list(G.predecessors(node)) + list(G.successors(node))
             if neighbors:
-                neighbor_opinions = [records[-1]['opinion']
-                                     for r in records
-                                     if r['user_id'] in neighbors and r['timestamp'] == t-1]
-                if neighbor_opinions:
-                    social_pull = 0.1 * (np.mean(neighbor_opinions) - opinion)
-                else:
-                    social_pull = 0
+                neighbor_ops = [user_opinions.get(n, 0) for n in neighbors]
+                social_pull = 0.2 * (np.mean(neighbor_ops) - user_opinions[node])
             else:
                 social_pull = 0
 
-            # Update opinion
-            opinion = opinion + social_pull + noise_scale * np.random.randn() * 0.1
+            # Update opinion with substantial noise
+            new_opinion = user_opinions[node] + social_pull + noise_scale * np.random.randn() * 0.5
+            new_opinions[node] = new_opinion
 
             records.append({
                 'user_id': node,
                 'timestamp': t,
-                'opinion': opinion
+                'opinion': new_opinion
             })
+
+        user_opinions = new_opinions
 
     opinions_df = pd.DataFrame(records)
 
