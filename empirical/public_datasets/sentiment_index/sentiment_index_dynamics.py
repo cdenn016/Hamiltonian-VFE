@@ -61,29 +61,55 @@ class RegionDynamics:
 
 
 def load_tsgi_data(data_dir: str) -> pd.DataFrame:
-    """Load TSGI data from CSV files."""
-    # Find all CSV files
-    csv_files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]
+    """
+    Load sentiment data from CSV files.
 
-    if not csv_files:
-        raise FileNotFoundError(
-            f"No CSV files found in {data_dir}. "
-            f"Please download from Harvard Dataverse."
-        )
+    Searches for:
+    1. "Sentiment Data - XXX" folders (Country, County, State, World)
+    2. Direct CSV files in the data directory
+    """
+    import glob as glob_module
 
-    # Load and concatenate all files
     dfs = []
-    for fname in csv_files:
-        fpath = os.path.join(data_dir, fname)
-        try:
-            df = pd.read_csv(fpath)
-            dfs.append(df)
-            print(f"  Loaded {fname}: {len(df):,} records")
-        except Exception as e:
-            print(f"  Error loading {fname}: {e}")
+
+    # First look for "Sentiment Data - XXX" folders
+    sentiment_folders = glob_module.glob(os.path.join(data_dir, 'Sentiment Data - *'))
+
+    if sentiment_folders:
+        print(f"  Found {len(sentiment_folders)} sentiment data folders:")
+        for folder in sentiment_folders:
+            folder_name = os.path.basename(folder)
+            level = folder_name.replace('Sentiment Data - ', '')
+            print(f"    - {folder_name}")
+
+            csv_files = glob_module.glob(os.path.join(folder, '*.csv'))
+            for fpath in csv_files:
+                try:
+                    df = pd.read_csv(fpath, low_memory=False)
+                    df['data_level'] = level  # Track data granularity
+                    dfs.append(df)
+                    print(f"      Loaded {os.path.basename(fpath)}: {len(df):,} records")
+                except Exception as e:
+                    print(f"      Error loading {os.path.basename(fpath)}: {e}")
+
+    # If no folders found, look for direct CSV files
+    if not dfs:
+        csv_files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]
+
+        for fname in csv_files:
+            fpath = os.path.join(data_dir, fname)
+            try:
+                df = pd.read_csv(fpath, low_memory=False)
+                dfs.append(df)
+                print(f"  Loaded {fname}: {len(df):,} records")
+            except Exception as e:
+                print(f"  Error loading {fname}: {e}")
 
     if not dfs:
-        raise FileNotFoundError("Could not load any data files")
+        raise FileNotFoundError(
+            f"No CSV files found in {data_dir}. "
+            f"Please place data in 'Sentiment Data - XXX' folders."
+        )
 
     combined = pd.concat(dfs, ignore_index=True)
     print(f"  Total: {len(combined):,} records")
@@ -92,32 +118,89 @@ def load_tsgi_data(data_dir: str) -> pd.DataFrame:
 
 
 def preprocess_tsgi(df: pd.DataFrame) -> pd.DataFrame:
-    """Preprocess TSGI data."""
-    # Standardize column names
-    df.columns = df.columns.str.lower()
+    """Preprocess sentiment data from various sources."""
+    print(f"  Raw columns: {list(df.columns[:10])}...")
 
-    # Parse date
-    date_cols = ['date', 'datetime', 'time']
+    # Standardize column names
+    df.columns = df.columns.str.lower().str.strip().str.replace(' ', '_').str.replace('-', '_')
+
+    print(f"  Standardized columns: {list(df.columns[:10])}...")
+
+    # Parse date - try many possible column names
+    date_cols = ['date', 'datetime', 'time', 'day', 'created_at', 'timestamp',
+                 'tweet_date', 'post_date']
+    date_found = False
     for col in date_cols:
         if col in df.columns:
             df['date'] = pd.to_datetime(df[col], errors='coerce')
+            date_found = True
+            print(f"  Using '{col}' as date")
             break
 
-    # Find sentiment column
-    sent_cols = ['sentiment_mean', 'sentiment', 'score', 'mean']
+    if not date_found:
+        # Try to find any column with 'date' or 'time' in the name
+        for col in df.columns:
+            if 'date' in col or 'time' in col or 'day' in col:
+                df['date'] = pd.to_datetime(df[col], errors='coerce')
+                date_found = True
+                print(f"  Using '{col}' as date")
+                break
+
+    # Find sentiment column - try many possible names
+    sent_cols = ['sentiment_mean', 'sentiment', 'score', 'mean', 'compound',
+                 'polarity', 'vader', 'avg_sentiment', 'daily_sentiment',
+                 'sentiment_score', 'vader_compound']
+    sentiment_found = False
     for col in sent_cols:
         if col in df.columns:
             df['sentiment'] = pd.to_numeric(df[col], errors='coerce')
+            sentiment_found = True
+            print(f"  Using '{col}' as sentiment")
             break
 
-    # Find region columns
-    region_cols = ['admin0', 'country', 'admin1', 'state', 'region']
+    if not sentiment_found:
+        # Try to find any column with 'sent' or 'score' in the name
+        for col in df.columns:
+            if 'sent' in col or 'score' in col or 'polarity' in col:
+                df['sentiment'] = pd.to_numeric(df[col], errors='coerce')
+                sentiment_found = True
+                print(f"  Using '{col}' as sentiment")
+                break
+
+    # Find region columns - Country, State, County, etc.
+    region_cols = ['admin0', 'country', 'admin1', 'state', 'region', 'county',
+                   'admin2', 'location', 'geo', 'place', 'country_name',
+                   'state_name', 'county_name']
+    region_found = False
     for col in region_cols:
         if col in df.columns:
             df['region'] = df[col].astype(str)
+            region_found = True
+            print(f"  Using '{col}' as region")
             break
 
+    if not region_found:
+        # Use data_level as region if available (from our folder loading)
+        if 'data_level' in df.columns:
+            df['region'] = df['data_level']
+            region_found = True
+            print(f"  Using 'data_level' as region")
+        else:
+            df['region'] = 'global'
+            print(f"  No region column found, using 'global'")
+
+    if not date_found or not sentiment_found:
+        print(f"  WARNING: Missing required columns")
+        print(f"  Available columns: {list(df.columns)}")
+        return pd.DataFrame()
+
     df = df.dropna(subset=['date', 'sentiment'])
+
+    print(f"  After preprocessing: {len(df):,} records")
+    if len(df) > 0:
+        print(f"  Date range: {df['date'].min()} to {df['date'].max()}")
+        print(f"  Regions: {df['region'].nunique()}")
+        print(f"  Sentiment range: {df['sentiment'].min():.3f} to {df['sentiment'].max():.3f}")
 
     return df
 
