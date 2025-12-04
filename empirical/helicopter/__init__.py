@@ -8,8 +8,7 @@ Framework for fitting Hamiltonian-VFE models to Nassar's helicopter task data.
 Key components:
     data_loader: Load and preprocess helicopter task datasets
     belief_agent: 1D belief agent for task modeling
-    dynamics: Hamiltonian vs gradient descent dynamics
-    fitting: Parameter fitting and model comparison
+    corrected_fitting: Corrected model fitting (delta rule, momentum, Hamiltonian)
     analysis: Prediction testing and visualization
 """
 
@@ -28,10 +27,12 @@ from .belief_agent import (
     HamiltonianDynamics
 )
 
-from .fitting import (
-    fit_subject,
-    compare_dynamics,
-    ModelFit
+from .corrected_fitting import (
+    run_delta_rule,
+    run_momentum_rule,
+    run_hamiltonian,
+    fit_all_models,
+    FitResult
 )
 
 from .analysis import (
@@ -40,5 +41,3 @@ from .analysis import (
     summarize_inertia_evidence,
     InertiaAnalysis
 )
-
-from .run_analysis import run_full_analysis
