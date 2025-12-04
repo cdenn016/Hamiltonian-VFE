@@ -226,6 +226,7 @@ def analyze_changepoint(arrays, cp_idx, before_window=20, after_window=20):
 
     Args:
         arrays: Dict with 'prediction_error', 'update', 'outcome', 'prediction'
+                Optional: 'noise_std' for sensory precision Λ_o
         cp_idx: Index of the changepoint trial
         before_window: Trials to use before CP
         after_window: Trials to use after CP
@@ -279,9 +280,42 @@ def analyze_changepoint(arrays, cp_idx, before_window=20, after_window=20):
     # Initial error magnitude (right after CP)
     initial_error = np.abs(errors_after[0]) if len(errors_after) > 0 else None
 
+    # Sensory precision: Λ_o = n/σ² (accumulated over n trials)
+    # n = trials since last changepoint (observations from current regime)
+    n_trials_stable = len(errors_before)  # trials in current regime before this CP
+
+    if 'noise_std' in arrays:
+        noise_std_before = arrays['noise_std'][before_start:before_end]
+        mean_noise_std = np.mean(noise_std_before) if len(noise_std_before) > 0 else None
+        if mean_noise_std is not None and mean_noise_std > 0:
+            # Static: single observation precision
+            lambda_o_static = 1.0 / (mean_noise_std ** 2)
+            # Accumulated: n observations from current regime
+            lambda_o = n_trials_stable / (mean_noise_std ** 2)
+        else:
+            lambda_o = None
+            lambda_o_static = None
+    else:
+        lambda_o = None
+        lambda_o_static = None
+        mean_noise_std = None
+
+    # Compute total mass M = Λ_p + Λ_o (theory prediction)
+    total_mass = {}
+    for method, lambda_p in precisions.items():
+        if lambda_o is not None and np.isfinite(lambda_p):
+            total_mass[method] = lambda_p + lambda_o
+        else:
+            total_mass[method] = None
+
     return {
         'cp_idx': cp_idx,
-        'precision_before': precisions,
+        'precision_before': precisions,  # Λ_p (prior precision estimates)
+        'lambda_o': lambda_o,  # Λ_o = n/σ² (accumulated sensory precision)
+        'lambda_o_static': lambda_o_static,  # 1/σ² (single observation)
+        'total_mass': total_mass,  # M = Λ_p + Λ_o
+        'n_stable': n_trials_stable,  # n = trials since last CP
+        'noise_std': mean_noise_std,
         'lr_before': lr_before,
         'tau': tau,
         'fit_quality': fit_quality,
@@ -304,6 +338,8 @@ def analyze_subject_changepoints(subject_data, min_trials_between=5):
         List of changepoint analysis results
     """
     arrays = subject_data.get_arrays()
+    # Include noise_std for sensory precision calculation
+    arrays['noise_std'] = arrays.get('noise_std', None)
     cp_indices = subject_data.get_changepoint_indices()
 
     results = []
@@ -531,6 +567,67 @@ def run_changepoint_analysis():
     if len(initial_errors) > 10:
         r_err, p_err = stats.spearmanr(initial_errors, taus_for_error)
         print(f"  Initial error vs τ: r = {r_err:.3f} (p = {p_err:.3f})")
+
+    # Test TOTAL MASS prediction: τ ~ M = Λ_0 + n/σ²
+    print("\n" + "-"*40)
+    print("THEORY TEST: τ ~ M = Λ_0 + n/σ²")
+    print("-"*40)
+    print("\nWhere n = trials since last changepoint")
+
+    # Test n alone (trials since last CP)
+    n_stables = [cp['n_stable'] for cp in all_cp_results
+                 if cp.get('n_stable') is not None and cp['tau'] is not None]
+    taus_for_n = [cp['tau'] for cp in all_cp_results
+                  if cp.get('n_stable') is not None and cp['tau'] is not None]
+
+    if len(n_stables) > 10:
+        r_n, p_n = stats.spearmanr(n_stables, taus_for_n)
+        print(f"\nTrials since last CP (n):")
+        print(f"  τ ~ n: r = {r_n:.3f} (p = {p_n:.3f})")
+        if p_n < 0.05 and r_n > 0:
+            print(f"  → More stable trials → longer relaxation time!")
+
+    # Test Λ_o = n/σ² (accumulated sensory precision)
+    lambda_os = [cp['lambda_o'] for cp in all_cp_results
+                 if cp['lambda_o'] is not None and cp['tau'] is not None]
+    taus_for_lo = [cp['tau'] for cp in all_cp_results
+                   if cp['lambda_o'] is not None and cp['tau'] is not None]
+
+    if len(lambda_os) > 10:
+        r_lo, p_lo = stats.spearmanr(lambda_os, taus_for_lo)
+        print(f"\nAccumulated sensory precision Λ_o = n/σ²:")
+        print(f"  τ ~ Λ_o: r = {r_lo:.3f} (p = {p_lo:.3f})")
+        if p_lo < 0.05 and r_lo > 0:
+            print(f"  ✓ Higher accumulated precision → longer relaxation!")
+
+    # Test static 1/σ² for comparison
+    lambda_o_statics = [cp.get('lambda_o_static') for cp in all_cp_results
+                        if cp.get('lambda_o_static') is not None and cp['tau'] is not None]
+    taus_for_static = [cp['tau'] for cp in all_cp_results
+                       if cp.get('lambda_o_static') is not None and cp['tau'] is not None]
+
+    if len(lambda_o_statics) > 10:
+        r_static, p_static = stats.spearmanr(lambda_o_statics, taus_for_static)
+        print(f"\nStatic sensory precision 1/σ² (single obs):")
+        print(f"  τ ~ 1/σ²: r = {r_static:.3f} (p = {p_static:.3f})")
+
+    # Test total mass M = Λ_p + n/σ²
+    for method in ['inverse_variance', 'bayesian']:
+        masses = []
+        taus_for_mass = []
+        for cp in all_cp_results:
+            if (cp['total_mass'] is not None and
+                cp['total_mass'].get(method) is not None and
+                cp['tau'] is not None):
+                masses.append(cp['total_mass'][method])
+                taus_for_mass.append(cp['tau'])
+
+        if len(masses) > 10:
+            r_mass, p_mass = stats.spearmanr(masses, taus_for_mass)
+            print(f"\nTotal mass M = Λ_p({method[:7]}) + n/σ²:")
+            print(f"  τ ~ M: r = {r_mass:.3f} (p = {p_mass:.3f})")
+            if p_mass < 0.05 and r_mass > 0:
+                print(f"  ✓ SUPPORTS τ = M/γ prediction!")
 
     print("\n" + "="*70)
 
