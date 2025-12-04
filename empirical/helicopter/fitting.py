@@ -15,19 +15,37 @@ Author: Hamiltonian-VFE Team
 Date: December 2025
 """
 
+import sys
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Callable
+from pathlib import Path
 from scipy.optimize import minimize, differential_evolution
 
-from .data_loader import SubjectData
-from .belief_agent import (
-    BeliefAgent1D,
-    GradientDynamics,
-    HamiltonianDynamics,
-    create_gradient_agent,
-    create_hamiltonian_agent
-)
+# Handle both module execution and direct script execution
+try:
+    from .data_loader import SubjectData
+    from .belief_agent import (
+        BeliefAgent1D,
+        GradientDynamics,
+        HamiltonianDynamics,
+        create_gradient_agent,
+        create_hamiltonian_agent
+    )
+except ImportError:
+    _this_dir = Path(__file__).parent
+    _project_root = _this_dir.parent.parent
+    if str(_project_root) not in sys.path:
+        sys.path.insert(0, str(_project_root))
+
+    from empirical.helicopter.data_loader import SubjectData
+    from empirical.helicopter.belief_agent import (
+        BeliefAgent1D,
+        GradientDynamics,
+        HamiltonianDynamics,
+        create_gradient_agent,
+        create_hamiltonian_agent
+    )
 
 
 # =============================================================================
