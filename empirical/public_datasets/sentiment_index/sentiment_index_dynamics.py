@@ -519,49 +519,66 @@ def fit_event_trajectory(
     t_full = daily['t_days'].values.astype(float)
     y_full = daily['sentiment_mean'].values
 
-    # Focus on post-event data for fitting
+    # Get pre-event baseline
+    pre_mask = t_full < 0
     post_mask = t_full >= 0
+
+    if np.sum(pre_mask) >= 2:
+        baseline = np.mean(y_full[pre_mask])
+    else:
+        baseline = y_full[0]
+
+    # Focus on post-event data for fitting
     t = t_full[post_mask]
     y = y_full[post_mask]
 
     if len(t) < 5:
         return None
 
-    # Center the data
-    y_mean = np.mean(y)
-    y_centered = y - y_mean
+    # Deviation from baseline (not from post-event mean!)
+    y_dev = y - baseline
 
-    # === Fit damped oscillator: y = A * exp(-ζωn*t) * cos(ωd*t + φ) + c ===
-    def osc_model(t, A, zeta_omega, omega_d, phi, c):
-        return A * np.exp(-zeta_omega * t) * np.cos(omega_d * t + phi) + c
+    # === Fit damped oscillator: y = baseline + A * exp(-ζωn*t) * cos(ωd*t + φ) ===
+    def osc_model(t, A, zeta_omega, omega_d, phi):
+        return A * np.exp(-zeta_omega * t) * np.cos(omega_d * t + phi)
 
     # Estimate initial frequency from zero crossings
-    crossings = np.where(np.diff(np.sign(y_centered)))[0]
+    crossings = np.where(np.diff(np.sign(y_dev)))[0]
     if len(crossings) >= 2:
         half_periods = np.diff(t[crossings])
-        omega_d0 = np.pi / np.mean(half_periods) if len(half_periods) > 0 else 0.3
+        omega_d0 = np.pi / np.mean(half_periods) if len(half_periods) > 0 else 0.5
     else:
-        omega_d0 = 0.3  # ~21 day period default
+        omega_d0 = 2 * np.pi / 10  # ~10 day period default
 
-    omega_d0 = np.clip(omega_d0, 0.05, 2.0)
-    A0 = np.max(np.abs(y_centered)) if np.max(np.abs(y_centered)) > 1e-10 else 0.1
+    omega_d0 = np.clip(omega_d0, 0.1, 3.0)
+
+    # Initial amplitude from first deviation
+    A0 = y_dev[0] if len(y_dev) > 0 else 0.1
+    if abs(A0) < 1e-10:
+        A0 = np.max(np.abs(y_dev)) if np.max(np.abs(y_dev)) > 1e-10 else 0.1
 
     best_osc_params = None
     best_osc_rss = np.inf
 
-    for omega_init in [omega_d0, omega_d0 * 0.5, omega_d0 * 2, 0.3, 0.5, 0.15]:
-        for zeta_init in [0.02, 0.05, 0.1, 0.2, 0.3]:
-            for phi_init in [0, np.pi/4, -np.pi/4, np.pi/2]:
+    # Search over more initial conditions
+    omega_candidates = [omega_d0, omega_d0 * 0.5, omega_d0 * 2,
+                        2*np.pi/7, 2*np.pi/14, 2*np.pi/21, 0.3, 0.6, 0.9]
+    zeta_candidates = [0.01, 0.03, 0.05, 0.1, 0.2, 0.3, 0.5]
+    phi_candidates = [0, np.pi/6, np.pi/3, np.pi/2, 2*np.pi/3, np.pi, -np.pi/6, -np.pi/3, -np.pi/2]
+
+    for omega_init in omega_candidates:
+        for zeta_init in zeta_candidates:
+            for phi_init in phi_candidates:
                 try:
                     popt, _ = optimize.curve_fit(
-                        osc_model, t, y_centered,
-                        p0=[A0, zeta_init, omega_init, phi_init, 0],
-                        maxfev=3000,
-                        bounds=([-np.inf, 0.001, 0.01, -np.pi, -0.5],
-                               [np.inf, 2, 5, np.pi, 0.5])
+                        osc_model, t, y_dev,
+                        p0=[A0, zeta_init, omega_init, phi_init],
+                        maxfev=2000,
+                        bounds=([-np.inf, 0.001, 0.05, -np.pi],
+                               [np.inf, 2, 3, np.pi])
                     )
                     y_pred = osc_model(t, *popt)
-                    rss = np.sum((y_centered - y_pred)**2)
+                    rss = np.sum((y_dev - y_pred)**2)
                     if rss < best_osc_rss:
                         best_osc_rss = rss
                         best_osc_params = popt
@@ -569,36 +586,36 @@ def fit_event_trajectory(
                     continue
 
     if best_osc_params is None:
-        best_osc_params = [A0, 0.1, omega_d0, 0, 0]
-        best_osc_rss = np.sum(y_centered**2)
+        best_osc_params = [A0, 0.1, omega_d0, 0]
+        best_osc_rss = np.sum(y_dev**2)
 
-    A, zeta_omega, omega_d, phi, c_osc = best_osc_params
+    A, zeta_omega, omega_d, phi = best_osc_params
 
-    # === Fit exponential decay ===
-    def exp_model(t, A_exp, lam, c_exp):
-        return A_exp * np.exp(-lam * t) + c_exp
+    # === Fit exponential decay: y = A * exp(-λt) ===
+    def exp_model(t, A_exp, lam):
+        return A_exp * np.exp(-lam * t)
 
     try:
         popt_exp, _ = optimize.curve_fit(
-            exp_model, t, y_centered,
-            p0=[A0, 0.1, 0],
-            maxfev=3000,
-            bounds=([-np.inf, 0.001, -0.5], [np.inf, 2, 0.5])
+            exp_model, t, y_dev,
+            p0=[A0, 0.1],
+            maxfev=2000,
+            bounds=([-np.inf, 0.001], [np.inf, 2])
         )
         y_exp_pred = exp_model(t, *popt_exp)
-        exp_rss = np.sum((y_centered - y_exp_pred)**2)
+        exp_rss = np.sum((y_dev - y_exp_pred)**2)
     except:
-        popt_exp = [A0, 0.1, 0]
-        exp_rss = np.sum(y_centered**2)
+        popt_exp = [A0, 0.1]
+        exp_rss = np.sum(y_dev**2)
 
     # Compute R² and AIC
-    ss_tot = np.sum((y_centered - np.mean(y_centered))**2)
+    ss_tot = np.sum((y_dev - np.mean(y_dev))**2)
     r2_osc = 1 - best_osc_rss / ss_tot if ss_tot > 0 else 0
     r2_exp = 1 - exp_rss / ss_tot if ss_tot > 0 else 0
 
     n = len(y)
-    aic_osc = compute_aic(n, best_osc_rss, 5)
-    aic_exp = compute_aic(n, exp_rss, 3)
+    aic_osc = compute_aic(n, best_osc_rss, 4)  # 4 params (no offset)
+    aic_exp = compute_aic(n, exp_rss, 2)  # 2 params
 
     # Derive physical parameters
     if omega_d > 0:
@@ -616,13 +633,15 @@ def fit_event_trajectory(
     y_osc_smooth = np.zeros_like(t_smooth)
     y_exp_smooth = np.zeros_like(t_smooth)
 
-    pre_mask = t_smooth < 0
-    y_osc_smooth[pre_mask] = y_mean
-    y_exp_smooth[pre_mask] = y_mean
+    # Pre-event: use baseline
+    pre_mask_smooth = t_smooth < 0
+    y_osc_smooth[pre_mask_smooth] = baseline
+    y_exp_smooth[pre_mask_smooth] = baseline
 
+    # Post-event: use fitted models + baseline
     post_mask_smooth = t_smooth >= 0
-    y_osc_smooth[post_mask_smooth] = osc_model(t_smooth[post_mask_smooth], A, zeta_omega, omega_d, phi, c_osc) + y_mean
-    y_exp_smooth[post_mask_smooth] = exp_model(t_smooth[post_mask_smooth], *popt_exp) + y_mean
+    y_osc_smooth[post_mask_smooth] = baseline + osc_model(t_smooth[post_mask_smooth], A, zeta_omega, omega_d, phi)
+    y_exp_smooth[post_mask_smooth] = baseline + exp_model(t_smooth[post_mask_smooth], *popt_exp)
 
     return FittedEventTrajectory(
         event_name=event_name,
@@ -634,7 +653,7 @@ def fit_event_trajectory(
         damping_coeff=zeta_omega,
         angular_freq=omega_d,
         phase=phi,
-        offset=c_osc + y_mean,
+        offset=baseline,
         damping_ratio=zeta,
         period_days=period,
         decay_time=decay_time,
