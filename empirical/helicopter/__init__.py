@@ -7,7 +7,8 @@ Framework for fitting Hamiltonian-VFE models to Nassar's helicopter task data.
 
 Key components:
     data_loader: Load and preprocess helicopter task datasets
-    run_analysis: Main analysis script (self-contained)
+    publication_analysis: Publication-quality analysis and figures
+    changepoint_analysis: Specialized changepoint analysis
 """
 
 from .data_loader import (
@@ -19,4 +20,11 @@ from .data_loader import (
     get_subject_data
 )
 
-from .run_analysis import run_full_analysis
+from .publication_analysis import (
+    run_publication_analysis,
+    fit_subject,
+    fit_population,
+    PopulationResults,
+    SubjectResults,
+    ModelFit
+)
