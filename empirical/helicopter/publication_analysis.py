@@ -806,68 +806,104 @@ def create_supplementary_figure(results: PopulationResults,
 
 
 def create_model_comparison_figure(results: PopulationResults,
+                                    subjects: Dict[int, SubjectData],
                                     save_path: Optional[Path] = None) -> plt.Figure:
-    """Create standalone model comparison figure."""
+    """Create figure showing belief trajectories with model fits for multiple subjects."""
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    axes = axes.flatten()
 
-    # Panel A: BIC wins bar chart
-    ax = axes[0]
-    models = ['Delta Rule', 'Momentum', 'Damped Osc.', 'Hamiltonian']
-    model_keys = ['delta', 'momentum', 'oscillator', 'hamiltonian']
-    wins = [results.bic_wins[k] for k in model_keys]
-    colors = ['#2196F3', '#FF9800', '#4CAF50', '#9C27B0']
+    # Select 4 diverse subjects: vary by learning rate and beta
+    subject_results = results.subject_results
 
-    bars = ax.bar(models, wins, color=colors, edgecolor='black', linewidth=0.5)
-    ax.axhline(y=results.n_subjects/4, color='gray', linestyle='--',
-               alpha=0.7, label='Chance level')
+    # Sort by beta to get range of momentum values
+    sorted_by_beta = sorted(subject_results, key=lambda r: r.fits['momentum'].params['beta'])
 
-    for bar, w in zip(bars, wins):
-        if w > 0:
-            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
-                   str(w), ha='center', va='bottom', fontsize=10, fontweight='bold')
+    # Pick: lowest beta, highest beta, and 2 from middle with different learning rates
+    selected_indices = [
+        0,  # Lowest beta (most delta-rule-like)
+        len(sorted_by_beta) - 1,  # Highest beta (most momentum)
+        len(sorted_by_beta) // 3,  # Lower-middle
+        2 * len(sorted_by_beta) // 3,  # Upper-middle
+    ]
 
-    ax.set_ylabel('Number of subjects (best fit by BIC)', fontsize=11)
-    ax.set_ylim(0, max(wins) * 1.15)
-    ax.set_title('A) Model Comparison', fontsize=12, fontweight='bold')
-    ax.legend(loc='upper right')
+    selected_results = [sorted_by_beta[i] for i in selected_indices]
 
-    # Panel B: Parameter distribution
-    ax = axes[1]
-    # Extract beta values from subject results
-    betas = np.array([r.fits['momentum'].params['beta'] for r in results.subject_results])
+    for ax_idx, subj_result in enumerate(selected_results):
+        ax = axes[ax_idx]
+        subj_id = subj_result.subject_id
+        subj_data = subjects[subj_id]
+        arrays = subj_data.get_arrays()
 
-    ax.hist(betas, bins=15, density=True, alpha=0.7, color='#FF9800',
-            edgecolor='black', linewidth=0.5, label='Histogram')
+        # Find a good changepoint to show
+        cp_indices = np.where(arrays['is_changepoint'])[0]
 
-    # KDE
-    kde_x = np.linspace(0, max(betas)*1.2, 100)
-    kde = stats.gaussian_kde(betas)
-    ax.plot(kde_x, kde(kde_x), 'r-', lw=2, label='KDE')
+        # Pick a changepoint with good surrounding data
+        if len(cp_indices) > 2:
+            cp_idx = cp_indices[len(cp_indices) // 2]  # Middle changepoint
+        else:
+            cp_idx = len(arrays['outcome']) // 2
 
-    # Statistics
-    ax.axvline(x=0, color='red', linestyle='-', lw=2, label=f'Mean={results.beta_mean:.3f}')
-    ax.axvline(x=results.beta_ci[0], color='red', linestyle='--', alpha=0.7, label='95% CI')
-    ax.axvline(x=results.beta_ci[1], color='red', linestyle='--', alpha=0.7)
+        # Window around changepoint
+        window_before = 5
+        window_after = 20
+        start = max(0, cp_idx - window_before)
+        end = min(len(arrays['outcome']), cp_idx + window_after)
 
-    t_stat, p_val = results.beta_ttest
-    ax.text(0.95, 0.95, f't({results.n_subjects-1}) = {t_stat:.2f}\np = {p_val:.3f}',
-           transform=ax.transAxes, ha='right', va='top', fontsize=10,
-           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        trials = np.arange(start, end)
+        human = arrays['prediction'][start:end]
+        outcomes = arrays['outcome'][start:end]
+        true_mean = arrays['true_mean'][start:end]
 
-    ax.set_xlabel('Momentum parameter beta', fontsize=11)
-    ax.set_ylabel('Density', fontsize=11)
-    ax.set_title('B) Distribution of Belief Inertia', fontsize=12, fontweight='bold')
-    ax.legend(loc='upper right', fontsize=8)
+        # Get model predictions (offset by 1 since predictions are for next trial)
+        delta_pred = subj_result.fits['delta'].predictions
+        mom_pred = subj_result.fits['momentum'].predictions
+
+        # Align predictions with trials
+        pred_start = min(start + 1, len(delta_pred))
+        pred_end = min(end + 1, len(delta_pred))
+        delta_slice = delta_pred[pred_start:pred_end]
+        mom_slice = mom_pred[pred_start:pred_end]
+        trial_slice = trials[:len(delta_slice)]
+
+        # Plot
+        ax.scatter(trials, outcomes, color='gray', alpha=0.4, s=20,
+                   label='Observations', zorder=1)
+        ax.plot(trials, true_mean, 'k--', linewidth=1.5, alpha=0.6,
+                label='True mean', zorder=2)
+        ax.plot(trials, human, 'ko-', linewidth=2, markersize=5,
+                label='Human', zorder=4)
+
+        # Model fits
+        lr = subj_result.fits['delta'].params['lr']
+        beta = subj_result.fits['momentum'].params['beta']
+
+        ax.plot(trial_slice, delta_slice, 'b-', linewidth=2, alpha=0.8,
+                label=f'Delta (alpha={lr:.2f})', zorder=3)
+        ax.plot(trial_slice, mom_slice, 'r-', linewidth=2, alpha=0.8,
+                label=f'Momentum (beta={beta:.3f})', zorder=3)
+
+        # Mark changepoint
+        if cp_idx >= start and cp_idx < end:
+            ax.axvline(cp_idx, color='green', linestyle=':', linewidth=2, alpha=0.7)
+
+        # Metrics
+        delta_mse = subj_result.fits['delta'].mse
+        mom_mse = subj_result.fits['momentum'].mse
+
+        ax.set_xlabel('Trial', fontsize=10)
+        ax.set_ylabel('Position', fontsize=10)
+        ax.set_title(f'Subject {subj_id}: Delta MSE={delta_mse:.1f}, Mom MSE={mom_mse:.1f}',
+                     fontsize=11, fontweight='bold')
+        ax.legend(loc='best', fontsize=8)
 
     plt.tight_layout()
 
     if save_path:
         fig.savefig(save_path, dpi=300, bbox_inches='tight')
-        # Also save PDF
         pdf_path = save_path.with_suffix('.pdf')
         fig.savefig(pdf_path, dpi=300, bbox_inches='tight')
-        print(f"Saved model comparison figure to {save_path}")
+        print(f"Saved trajectory comparison figure to {save_path}")
 
     return fig
 
@@ -1110,7 +1146,7 @@ def run_publication_analysis(output_dir: Optional[Path] = None,
         plt.close(fig_supp)
 
         fig_comp = create_model_comparison_figure(
-            results,
+            results, subjects,
             save_path=output_dir / 'helicopter_model_comparison.png'
         )
         plt.close(fig_comp)
