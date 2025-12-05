@@ -1,0 +1,64 @@
+\section{Discussion}
+
+This work provides a first-principles derivation of belief dynamics as Hamiltonian mechanics on the statistical manifold, establishing why phenomenological spring-mass models of belief change---long used in psychology and opinion dynamics---are not merely useful curve fits but emerge necessarily from variational inference.
+
+\subsection{Theoretical Contribution}
+
+Our central result is that beliefs minimizing variational free energy follow geodesic motion on a curved statistical manifold, with dynamics governed by:
+\begin{equation}
+M\ddot{\mu} + \gamma\dot{\mu} + \nabla_\mu F = 0
+\end{equation}
+This damped oscillator form emerges not from assumption but from the geometry of probability distributions. The ``mass'' $M$ equals the Fisher information---the curvature of the belief manifold---and determines how strongly beliefs resist change. High-precision priors, reliable sensory evidence, and dense social connections all contribute to this inertia.
+
+This derivation resolves a long-standing puzzle: why do oscillatory and inertial phenomena appear across disparate domains of belief dynamics? The Kaplowitz-Fink model of attitude change \cite{kaplowitz1992}, overshoot in perceptual adaptation \cite{burge2008}, underdamped opinion dynamics in social networks \cite{wang2023}, and momentum effects in economic expectations \cite{coibion2015} all employ spring-mass metaphors without theoretical justification. Our framework shows these are not analogies but consequences of how uncertain inference works geometrically.
+
+\subsection{Dynamical Regimes}
+
+The ratio $\gamma/\sqrt{M}$ determines qualitative behavior:
+\begin{itemize}
+    \item \textbf{Overdamped} ($\gamma/\sqrt{M} > 2$): Beliefs approach equilibrium monotonically. This regime corresponds to high noise, strong damping, or weak priors---conditions where uncertainty prevents momentum from accumulating.
+    \item \textbf{Critically damped} ($\gamma/\sqrt{M} = 2$): Fastest convergence without oscillation. Optimal for tracking in stationary environments.
+    \item \textbf{Underdamped} ($\gamma/\sqrt{M} < 2$): Beliefs oscillate around equilibrium before settling. This regime explains overshoot phenomena and the ``pendulum swing'' of attitudes.
+\end{itemize}
+
+Importantly, the delta rule (gradient descent) emerges as the zero-mass limit: when Fisher information vanishes, the oscillator equation reduces to $\dot{\mu} = -\alpha\nabla F$. Thus, the widely-used delta rule is not an alternative to Hamiltonian dynamics but a special case for beliefs with negligible inertia.
+
+\subsection{Empirical Validation}
+
+Our analysis of the helicopter task \cite{mcguire2014} provides a critical test case. This task features high observation noise, frequent environmental change (hazard rate $H \approx 0.1$), and no social coupling---conditions that theory predicts should produce overdamped dynamics. Indeed, we find:
+\begin{itemize}
+    \item The momentum parameter $\beta$ is statistically non-zero but small (mean $= 0.003$, $p = 0.01$)
+    \item Fitted damping ratios indicate the overdamped regime
+    \item The simple delta rule provides adequate fit for 97\% of participants
+\end{itemize}
+
+This ``null result'' for oscillation is in fact a successful prediction: the helicopter task was designed to study learning rate adaptation, not belief inertia. Its parameters place observers firmly in the overdamped regime where our theory reduces to existing models. The contribution of the present framework is explaining \textit{why} gradient descent works here while oscillatory dynamics appear elsewhere.
+
+\subsection{Predictions for Future Work}
+
+Our framework makes specific, testable predictions about when belief inertia should manifest:
+
+\begin{enumerate}
+    \item \textbf{Strong priors increase inertia.} Experts with high-precision beliefs should show greater resistance to updating and potential overshoot when forced to change. This accords with observations of ``belief perseverance'' in social psychology \cite{anderson1980}.
+
+    \item \textbf{Social coupling produces collective oscillation.} Dense social networks with strong influence should exhibit underdamped collective dynamics. The framework predicts oscillation frequency $\omega \propto \sqrt{\Lambda_{\text{social}}/M}$ and damping $\gamma \propto$ network heterogeneity.
+
+    \item \textbf{Precision determines regime.} The same individual may show overdamped dynamics for uncertain beliefs and underdamped dynamics for confident ones. Cross-domain studies tracking the same beliefs under varying uncertainty could test this.
+
+    \item \textbf{Critical damping is optimal.} If belief systems have been shaped by evolutionary or learning pressures, we predict they should operate near critical damping for ecologically relevant domains---trading off responsiveness against stability.
+\end{enumerate}
+
+\subsection{Relation to Active Inference}
+
+This work extends the active inference framework \cite{friston2010, parr2022} by emphasizing the role of information geometry in determining dynamical regimes. While active inference typically focuses on action selection and model evidence, we show that the same variational principles govern the \textit{dynamics} of belief change, not just its direction. The ``inertia of belief'' is not a bias to be corrected but a feature of optimal inference under uncertainty.
+
+\subsection{Limitations}
+
+Several limitations warrant mention. First, our empirical test used a perceptual task where oscillation was not expected; testing the underdamped regime requires datasets from domains where oscillation has been observed (attitude change, economic expectations, social dynamics). Second, the current formulation assumes Gaussian beliefs; extending to multimodal posteriors or discrete hypothesis spaces remains future work. Third, estimating Fisher information from behavioral data is challenging; neuroimaging measures of uncertainty \cite{schwartenbeck2016} could provide independent estimates of the mass parameter.
+
+\subsection{Conclusion}
+
+We have shown that belief dynamics under variational free energy minimization are Hamiltonian dynamics on the statistical manifold. This provides a principled derivation of spring-mass models of belief change, explains the conditions under which beliefs exhibit inertia versus gradient-following, and unifies observations across psychology, neuroscience, and opinion dynamics. The ``inertia of belief'' emerges not from cognitive bias but from the geometry of uncertain inference.
+
+\end antml:parameter>
+</invoke>
