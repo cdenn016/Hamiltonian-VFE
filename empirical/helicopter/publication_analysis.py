@@ -1005,7 +1005,7 @@ def run_publication_analysis(output_dir: Optional[Path] = None,
 
     # Save statistics
     stats_path = output_dir / 'statistics_summary.txt'
-    with open(stats_path, 'w') as f:
+    with open(stats_path, 'w', encoding='utf-8') as f:
         f.write(stats_text)
     print(f"Saved statistics to {stats_path}")
 
@@ -1014,13 +1014,13 @@ def run_publication_analysis(output_dir: Optional[Path] = None,
     print(manuscript_text)
 
     manuscript_path = output_dir / 'manuscript_text.txt'
-    with open(manuscript_path, 'w') as f:
+    with open(manuscript_path, 'w', encoding='utf-8') as f:
         f.write(manuscript_text)
 
     # Generate LaTeX table
     latex_table = generate_latex_table(results)
     latex_path = output_dir / 'results_table.tex'
-    with open(latex_path, 'w') as f:
+    with open(latex_path, 'w', encoding='utf-8') as f:
         f.write(latex_table)
     print(f"Saved LaTeX table to {latex_path}")
 
