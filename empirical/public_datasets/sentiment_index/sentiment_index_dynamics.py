@@ -455,6 +455,395 @@ def visualize_results(
     print(f"\nSaved figure to: {save_path}")
 
 
+@dataclass
+class FittedEventTrajectory:
+    """Fitted model parameters for an event response."""
+    event_name: str
+    t: np.ndarray  # Time array (days)
+    y_data: np.ndarray  # Observed data
+    y_oscillator: np.ndarray  # Fitted oscillator prediction
+    y_exponential: np.ndarray  # Fitted exponential prediction
+    # Oscillator parameters
+    amplitude: float
+    damping_coeff: float  # ζωn
+    angular_freq: float  # ωd
+    phase: float
+    offset: float
+    # Derived quantities
+    damping_ratio: float
+    period_days: float
+    decay_time: float
+    # Fit quality
+    r2_oscillator: float
+    r2_exponential: float
+    aic_oscillator: float
+    aic_exponential: float
+    n_points: int
+
+
+def compute_aic(n: int, rss: float, k: int) -> float:
+    """Compute AIC for a model."""
+    if rss <= 0 or n <= k:
+        return np.inf
+    return n * np.log(rss / n) + 2 * k
+
+
+def fit_event_trajectory(
+    df: pd.DataFrame,
+    event_time: datetime,
+    event_name: str,
+    window_before: int = 7,
+    window_after: int = 30
+) -> Optional[FittedEventTrajectory]:
+    """
+    Fit damped oscillator and exponential decay to event response.
+    """
+    start = event_time - timedelta(days=window_before)
+    end = event_time + timedelta(days=window_after)
+
+    window = df[(df['date'] >= start) & (df['date'] <= end)]
+
+    if len(window) < 10:
+        return None
+
+    # Aggregate globally by day
+    daily = window.groupby('date').agg({
+        'sentiment': 'mean'
+    }).reset_index()
+    daily.columns = ['date', 'sentiment_mean']
+    daily = daily.sort_values('date')
+
+    # Time relative to event
+    daily['t_days'] = (daily['date'] - event_time).dt.days
+
+    t_full = daily['t_days'].values.astype(float)
+    y_full = daily['sentiment_mean'].values
+
+    # Focus on post-event data for fitting
+    post_mask = t_full >= 0
+    t = t_full[post_mask]
+    y = y_full[post_mask]
+
+    if len(t) < 5:
+        return None
+
+    # Center the data
+    y_mean = np.mean(y)
+    y_centered = y - y_mean
+
+    # === Fit damped oscillator: y = A * exp(-ζωn*t) * cos(ωd*t + φ) + c ===
+    def osc_model(t, A, zeta_omega, omega_d, phi, c):
+        return A * np.exp(-zeta_omega * t) * np.cos(omega_d * t + phi) + c
+
+    # Estimate initial frequency from zero crossings
+    crossings = np.where(np.diff(np.sign(y_centered)))[0]
+    if len(crossings) >= 2:
+        half_periods = np.diff(t[crossings])
+        omega_d0 = np.pi / np.mean(half_periods) if len(half_periods) > 0 else 0.3
+    else:
+        omega_d0 = 0.3  # ~21 day period default
+
+    omega_d0 = np.clip(omega_d0, 0.05, 2.0)
+    A0 = np.max(np.abs(y_centered)) if np.max(np.abs(y_centered)) > 1e-10 else 0.1
+
+    best_osc_params = None
+    best_osc_rss = np.inf
+
+    for omega_init in [omega_d0, omega_d0 * 0.5, omega_d0 * 2, 0.3, 0.5, 0.15]:
+        for zeta_init in [0.02, 0.05, 0.1, 0.2, 0.3]:
+            for phi_init in [0, np.pi/4, -np.pi/4, np.pi/2]:
+                try:
+                    popt, _ = optimize.curve_fit(
+                        osc_model, t, y_centered,
+                        p0=[A0, zeta_init, omega_init, phi_init, 0],
+                        maxfev=3000,
+                        bounds=([-np.inf, 0.001, 0.01, -np.pi, -0.5],
+                               [np.inf, 2, 5, np.pi, 0.5])
+                    )
+                    y_pred = osc_model(t, *popt)
+                    rss = np.sum((y_centered - y_pred)**2)
+                    if rss < best_osc_rss:
+                        best_osc_rss = rss
+                        best_osc_params = popt
+                except:
+                    continue
+
+    if best_osc_params is None:
+        best_osc_params = [A0, 0.1, omega_d0, 0, 0]
+        best_osc_rss = np.sum(y_centered**2)
+
+    A, zeta_omega, omega_d, phi, c_osc = best_osc_params
+
+    # === Fit exponential decay ===
+    def exp_model(t, A_exp, lam, c_exp):
+        return A_exp * np.exp(-lam * t) + c_exp
+
+    try:
+        popt_exp, _ = optimize.curve_fit(
+            exp_model, t, y_centered,
+            p0=[A0, 0.1, 0],
+            maxfev=3000,
+            bounds=([-np.inf, 0.001, -0.5], [np.inf, 2, 0.5])
+        )
+        y_exp_pred = exp_model(t, *popt_exp)
+        exp_rss = np.sum((y_centered - y_exp_pred)**2)
+    except:
+        popt_exp = [A0, 0.1, 0]
+        exp_rss = np.sum(y_centered**2)
+
+    # Compute R² and AIC
+    ss_tot = np.sum((y_centered - np.mean(y_centered))**2)
+    r2_osc = 1 - best_osc_rss / ss_tot if ss_tot > 0 else 0
+    r2_exp = 1 - exp_rss / ss_tot if ss_tot > 0 else 0
+
+    n = len(y)
+    aic_osc = compute_aic(n, best_osc_rss, 5)
+    aic_exp = compute_aic(n, exp_rss, 3)
+
+    # Derive physical parameters
+    if omega_d > 0:
+        zeta_sq = zeta_omega**2 / (omega_d**2 + zeta_omega**2)
+        zeta = np.sqrt(zeta_sq)
+    else:
+        zeta = 1.0
+
+    period = 2 * np.pi / omega_d if omega_d > 0 else np.inf
+    decay_time = 1 / zeta_omega if zeta_omega > 0 else np.inf
+
+    # Generate smooth predictions
+    t_smooth = np.linspace(t_full.min(), t_full.max(), 200)
+
+    y_osc_smooth = np.zeros_like(t_smooth)
+    y_exp_smooth = np.zeros_like(t_smooth)
+
+    pre_mask = t_smooth < 0
+    y_osc_smooth[pre_mask] = y_mean
+    y_exp_smooth[pre_mask] = y_mean
+
+    post_mask_smooth = t_smooth >= 0
+    y_osc_smooth[post_mask_smooth] = osc_model(t_smooth[post_mask_smooth], A, zeta_omega, omega_d, phi, c_osc) + y_mean
+    y_exp_smooth[post_mask_smooth] = exp_model(t_smooth[post_mask_smooth], *popt_exp) + y_mean
+
+    return FittedEventTrajectory(
+        event_name=event_name,
+        t=t_smooth,
+        y_data=y_full,
+        y_oscillator=y_osc_smooth,
+        y_exponential=y_exp_smooth,
+        amplitude=A,
+        damping_coeff=zeta_omega,
+        angular_freq=omega_d,
+        phase=phi,
+        offset=c_osc + y_mean,
+        damping_ratio=zeta,
+        period_days=period,
+        decay_time=decay_time,
+        r2_oscillator=max(0, r2_osc),
+        r2_exponential=max(0, r2_exp),
+        aic_oscillator=aic_osc,
+        aic_exponential=aic_exp,
+        n_points=len(y_full)
+    )
+
+
+def plot_fitted_event_trajectories(
+    df: pd.DataFrame,
+    events: Dict[str, datetime],
+    output_dir: str
+) -> List[FittedEventTrajectory]:
+    """
+    Generate fitted trajectory plots for each event.
+    """
+    print("\n" + "=" * 70)
+    print("GENERATING FITTED EVENT TRAJECTORIES")
+    print("=" * 70)
+
+    trajectories = []
+    valid_events = []
+
+    # First pass: fit all events
+    for event_name, event_time in events.items():
+        if df['date'].min() <= event_time <= df['date'].max():
+            traj = fit_event_trajectory(df, event_time, event_name)
+            if traj is not None:
+                trajectories.append(traj)
+                valid_events.append((event_name, event_time))
+
+    if not trajectories:
+        print("  No events with sufficient data")
+        return []
+
+    # Create figure
+    n_events = len(trajectories)
+    fig, axes = plt.subplots(n_events, 1, figsize=(14, 4 * n_events))
+    if n_events == 1:
+        axes = [axes]
+
+    for idx, traj in enumerate(trajectories):
+        event_name, event_time = valid_events[idx]
+        ax = axes[idx]
+
+        print(f"\n  {event_name}:")
+
+        # Get data points for plotting
+        start = event_time - timedelta(days=7)
+        end = event_time + timedelta(days=30)
+        window = df[(df['date'] >= start) & (df['date'] <= end)]
+        daily = window.groupby('date').agg({'sentiment': 'mean'}).reset_index()
+        daily['t_days'] = (daily['date'] - event_time).dt.days
+        t_data = daily['t_days'].values
+        y_data = daily['sentiment'].values
+
+        # Plot
+        ax.scatter(t_data, y_data, s=60, c='black', alpha=0.8, zorder=5, label=f'Data (n={traj.n_points})')
+        ax.plot(traj.t, traj.y_oscillator, 'b-', lw=2.5,
+                label=f'Damped Oscillator (R²={traj.r2_oscillator:.3f})')
+        ax.plot(traj.t, traj.y_exponential, 'r--', lw=2, alpha=0.7,
+                label=f'Exponential Decay (R²={traj.r2_exponential:.3f})')
+        ax.axvline(0, color='green', ls='-', lw=2, alpha=0.7, label='Event')
+
+        # Decay envelope
+        t_post = traj.t[traj.t >= 0]
+        envelope_upper = traj.offset + traj.amplitude * np.exp(-traj.damping_coeff * t_post)
+        envelope_lower = traj.offset - traj.amplitude * np.exp(-traj.damping_coeff * t_post)
+        ax.fill_between(t_post, envelope_lower, envelope_upper,
+                        alpha=0.15, color='blue', label='Decay envelope')
+
+        ax.set_xlabel('Days from Event', fontsize=11)
+        ax.set_ylabel('Global Sentiment', fontsize=11)
+        ax.set_xlim(-8, 32)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper right', fontsize=9)
+
+        # Title
+        regime = "UNDERDAMPED" if traj.damping_ratio < 1 else "OVERDAMPED"
+        delta_aic = traj.aic_exponential - traj.aic_oscillator
+        better = "oscillator" if delta_aic > 2 else ("exponential" if delta_aic < -2 else "tie")
+
+        title = (f"{event_name.replace('_', ' ').title()} - {event_time.strftime('%Y-%m-%d')}\n"
+                f"{regime} (ζ = {traj.damping_ratio:.3f}), "
+                f"T = {traj.period_days:.1f} days, "
+                f"τ = {traj.decay_time:.1f} days, "
+                f"ΔAIC = {delta_aic:.1f} ({better})")
+        ax.set_title(title, fontsize=11, fontweight='bold')
+
+        # Parameter box
+        param_text = (
+            f"Damped Oscillator Model\n"
+            f"y(t) = A·exp(-ζωₙt)·cos(ωdt + φ) + c\n"
+            f"────────────────────────────\n"
+            f"A (amplitude)     = {traj.amplitude:.5f}\n"
+            f"ζ (damping ratio) = {traj.damping_ratio:.4f}\n"
+            f"ωd (angular freq) = {traj.angular_freq:.4f} rad/day\n"
+            f"φ (phase)         = {traj.phase:.4f} rad\n"
+            f"c (offset)        = {traj.offset:.5f}\n"
+            f"────────────────────────────\n"
+            f"Period T          = {traj.period_days:.2f} days\n"
+            f"Decay time τ      = {traj.decay_time:.2f} days"
+        )
+
+        props = dict(boxstyle='round,pad=0.5', facecolor='wheat', alpha=0.85)
+        ax.text(0.02, 0.98, param_text, transform=ax.transAxes, fontsize=8,
+                verticalalignment='top', fontfamily='monospace', bbox=props)
+
+        print(f"    ζ = {traj.damping_ratio:.3f}, T = {traj.period_days:.1f} days, n = {traj.n_points}")
+        print(f"    R²(osc) = {traj.r2_oscillator:.3f}, R²(exp) = {traj.r2_exponential:.3f}")
+        print(f"    ΔAIC = {delta_aic:.1f} → {better} model preferred")
+
+    plt.tight_layout()
+
+    save_path = os.path.join(output_dir, 'sentiment_index_fitted_trajectories.png')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
+    print(f"\n  Saved to: {save_path}")
+
+    # Individual plots
+    for traj in trajectories:
+        event_time = events[traj.event_name]
+        fig_single, ax = plt.subplots(figsize=(12, 6))
+
+        start = event_time - timedelta(days=7)
+        end = event_time + timedelta(days=30)
+        window = df[(df['date'] >= start) & (df['date'] <= end)]
+        daily = window.groupby('date').agg({'sentiment': 'mean'}).reset_index()
+        daily['t_days'] = (daily['date'] - event_time).dt.days
+        t_data = daily['t_days'].values
+        y_data = daily['sentiment'].values
+
+        ax.scatter(t_data, y_data, s=80, c='black', alpha=0.8, zorder=5, label=f'Observed Data (n={traj.n_points})')
+        ax.plot(traj.t, traj.y_oscillator, 'b-', lw=3,
+                label=f'Damped Oscillator (R²={traj.r2_oscillator:.3f})')
+        ax.plot(traj.t, traj.y_exponential, 'r--', lw=2.5, alpha=0.8,
+                label=f'Exponential Decay (R²={traj.r2_exponential:.3f})')
+        ax.axvline(0, color='green', ls='-', lw=2.5, alpha=0.8, label='Event')
+
+        t_post = traj.t[traj.t >= 0]
+        envelope_upper = traj.offset + traj.amplitude * np.exp(-traj.damping_coeff * t_post)
+        envelope_lower = traj.offset - traj.amplitude * np.exp(-traj.damping_coeff * t_post)
+        ax.fill_between(t_post, envelope_lower, envelope_upper,
+                        alpha=0.2, color='blue', label='Decay envelope')
+
+        ax.set_xlabel('Days from Event', fontsize=12)
+        ax.set_ylabel('Global Sentiment', fontsize=12)
+        ax.set_xlim(-8, 32)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper right', fontsize=10)
+
+        regime = "UNDERDAMPED" if traj.damping_ratio < 1 else "OVERDAMPED"
+        delta_aic = traj.aic_exponential - traj.aic_oscillator
+        better = "oscillator" if delta_aic > 2 else ("exponential" if delta_aic < -2 else "tie")
+
+        ax.set_title(
+            f"Sentiment Dynamics: {traj.event_name.replace('_', ' ').title()}\n"
+            f"{regime} (ζ = {traj.damping_ratio:.3f}, T = {traj.period_days:.1f} days)",
+            fontsize=13, fontweight='bold'
+        )
+
+        param_text = (
+            f"Damped Oscillator: y(t) = A·exp(-ζωₙt)·cos(ωdt + φ) + c\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Amplitude A        = {traj.amplitude:.6f}\n"
+            f"Damping ratio ζ    = {traj.damping_ratio:.5f}\n"
+            f"Angular freq ωd    = {traj.angular_freq:.5f} rad/day\n"
+            f"Phase φ            = {traj.phase:.5f} rad\n"
+            f"Offset c           = {traj.offset:.6f}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Period T = 2π/ωd   = {traj.period_days:.3f} days\n"
+            f"Decay time τ       = {traj.decay_time:.3f} days\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"R² (oscillator)    = {traj.r2_oscillator:.4f}\n"
+            f"R² (exponential)   = {traj.r2_exponential:.4f}\n"
+            f"ΔAIC               = {delta_aic:.2f} → {better}"
+        )
+
+        props = dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.9)
+        ax.text(0.02, 0.98, param_text, transform=ax.transAxes, fontsize=9,
+                verticalalignment='top', fontfamily='monospace', bbox=props)
+
+        plt.tight_layout()
+        single_path = os.path.join(output_dir, f'trajectory_{traj.event_name}.png')
+        plt.savefig(single_path, dpi=150, bbox_inches='tight', facecolor='white')
+        plt.close(fig_single)
+
+    plt.close(fig)
+
+    # Summary table
+    print("\n" + "=" * 95)
+    print("FITTED PARAMETERS SUMMARY")
+    print("=" * 95)
+    print(f"{'Event':<22} {'n':>5} {'ζ':>8} {'T(days)':>10} {'τ(days)':>10} {'R²(osc)':>10} {'R²(exp)':>10} {'ΔAIC':>10}")
+    print("-" * 95)
+
+    for traj in trajectories:
+        delta_aic = traj.aic_exponential - traj.aic_oscillator
+        print(f"{traj.event_name:<22} {traj.n_points:>5} {traj.damping_ratio:>8.4f} "
+              f"{traj.period_days:>10.2f} {traj.decay_time:>10.2f} "
+              f"{traj.r2_oscillator:>10.4f} {traj.r2_exponential:>10.4f} {delta_aic:>10.2f}")
+
+    print("-" * 95)
+
+    return trajectories
+
+
 def generate_sample_data():
     """Generate sample TSGI data for demonstration."""
     print("Generating sample TSGI data for demonstration...")
@@ -575,8 +964,12 @@ Analyzing:
     print(f"  Events with oscillation: {n_oscillating_events}/{len(event_results)}")
 
     # Visualize
-    print("\n[5/5] Creating visualizations...")
+    print("\n[5/6] Creating visualizations...")
     visualize_results(region_results, event_results)
+
+    # Generate fitted trajectory plots
+    print("\n[6/6] Generating fitted trajectory plots...")
+    trajectories = plot_fitted_event_trajectories(df, GLOBAL_EVENTS, OUTPUT_DIR)
 
     # Final summary
     print("\n" + "=" * 70)
