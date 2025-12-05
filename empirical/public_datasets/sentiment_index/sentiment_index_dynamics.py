@@ -433,13 +433,25 @@ def visualize_results(
     ax.set_title('C. Oscillations After Global Events')
     ax.tick_params(axis='x', rotation=45)
 
-    # Panel D: Example event time series
+    # Panel D: Example event time series with error bars
     ax = axes[1, 1]
-    for name, result in list(event_results.items())[:2]:
+    colors = ['steelblue', 'coral']
+    for idx, (name, result) in enumerate(list(event_results.items())[:2]):
         if result is not None and 'daily_data' in result:
             daily = result['daily_data']
-            ax.plot(daily['t_days'], daily['sentiment_mean'],
-                    'o-', label=name, alpha=0.7, markersize=4)
+            t_days = daily['t_days'].values
+            y_mean = daily['sentiment_mean'].values
+            # Add error bars if std and count available
+            if 'sentiment_std' in daily.columns and 'count' in daily.columns:
+                y_std = daily['sentiment_std'].values
+                n_count = daily['count'].values
+                y_err = y_std / np.sqrt(np.maximum(n_count, 1))
+                ax.errorbar(t_days, y_mean, yerr=y_err, fmt='o-',
+                           label=name, alpha=0.7, markersize=4, capsize=2,
+                           color=colors[idx % len(colors)])
+            else:
+                ax.plot(t_days, y_mean, 'o-', label=name, alpha=0.7, markersize=4,
+                       color=colors[idx % len(colors)])
     ax.axvline(0, color='red', ls='--', alpha=0.5)
     ax.set_xlabel('Days from Event')
     ax.set_ylabel('Global Sentiment')
@@ -719,18 +731,25 @@ def plot_fitted_event_trajectories_fixed(
 
         print(f"\n  {event_name}:")
 
-        # Get data points
+        # Get data points with std for error bars
         start = event_time - timedelta(days=7)
         end = event_time + timedelta(days=30)
         window = df[(df['date'] >= start) & (df['date'] <= end)]
-        daily = window.groupby('date').agg({'sentiment': 'mean'}).reset_index()
+        daily = window.groupby('date').agg({'sentiment': ['mean', 'std', 'count']}).reset_index()
+        daily.columns = ['date', 'sentiment_mean', 'sentiment_std', 'count']
         daily['t_days'] = (daily['date'] - event_time).dt.days
         t_data = daily['t_days'].values
-        y_data = daily['sentiment'].values
+        y_data = daily['sentiment_mean'].values
 
-        # Plot data
-        ax.scatter(t_data, y_data, s=60, c='black', alpha=0.8, zorder=5,
-                   label=f'Data (n={traj.n_points})')
+        # Calculate standard error for error bars
+        y_std = daily['sentiment_std'].values
+        n_count = daily['count'].values
+        y_err = y_std / np.sqrt(np.maximum(n_count, 1))
+
+        # Plot data with error bars
+        ax.errorbar(t_data, y_data, yerr=y_err, fmt='o', ms=6, c='black',
+                   alpha=0.8, zorder=5, capsize=2, capthick=1, elinewidth=1,
+                   label=f'Data (±SE, n={traj.n_points})')
         
         # Plot fits
         ax.plot(traj.t, traj.y_oscillator, 'b-', lw=2.5,
@@ -788,12 +807,20 @@ def plot_fitted_event_trajectories_fixed(
         start = event_time - timedelta(days=7)
         end = event_time + timedelta(days=30)
         window = df[(df['date'] >= start) & (df['date'] <= end)]
-        daily = window.groupby('date').agg({'sentiment': 'mean'}).reset_index()
+        daily = window.groupby('date').agg({'sentiment': ['mean', 'std', 'count']}).reset_index()
+        daily.columns = ['date', 'sentiment_mean', 'sentiment_std', 'count']
         daily['t_days'] = (daily['date'] - event_time).dt.days
         t_data = daily['t_days'].values
-        y_data = daily['sentiment'].values
+        y_data = daily['sentiment_mean'].values
 
-        ax.scatter(t_data, y_data, s=80, c='black', alpha=0.8, zorder=5, label=f'Observed Data (n={traj.n_points})')
+        # Calculate standard error for error bars
+        y_std = daily['sentiment_std'].values
+        n_count = daily['count'].values
+        y_err = y_std / np.sqrt(np.maximum(n_count, 1))
+
+        ax.errorbar(t_data, y_data, yerr=y_err, fmt='o', ms=8, c='black',
+                   alpha=0.8, zorder=5, capsize=3, capthick=1, elinewidth=1,
+                   label=f'Observed Data (±SE, n={traj.n_points})')
         ax.plot(traj.t, traj.y_oscillator, 'b-', lw=3,
                 label=f'Damped Oscillator (R²={traj.r2_oscillator:.3f})')
         ax.plot(traj.t, traj.y_exponential, 'r--', lw=2.5, alpha=0.8,
