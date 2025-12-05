@@ -805,6 +805,73 @@ def create_supplementary_figure(results: PopulationResults,
     return fig
 
 
+def create_model_comparison_figure(results: PopulationResults,
+                                    save_path: Optional[Path] = None) -> plt.Figure:
+    """Create standalone model comparison figure."""
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+    # Panel A: BIC wins bar chart
+    ax = axes[0]
+    models = ['Delta Rule', 'Momentum', 'Damped Osc.', 'Hamiltonian']
+    model_keys = ['delta', 'momentum', 'oscillator', 'hamiltonian']
+    wins = [results.bic_wins[k] for k in model_keys]
+    colors = ['#2196F3', '#FF9800', '#4CAF50', '#9C27B0']
+
+    bars = ax.bar(models, wins, color=colors, edgecolor='black', linewidth=0.5)
+    ax.axhline(y=results.n_subjects/4, color='gray', linestyle='--',
+               alpha=0.7, label='Chance level')
+
+    for bar, w in zip(bars, wins):
+        if w > 0:
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                   str(w), ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+    ax.set_ylabel('Number of subjects (best fit by BIC)', fontsize=11)
+    ax.set_ylim(0, max(wins) * 1.15)
+    ax.set_title('A) Model Comparison', fontsize=12, fontweight='bold')
+    ax.legend(loc='upper right')
+
+    # Panel B: Parameter distribution
+    ax = axes[1]
+    # Extract beta values from subject results
+    betas = np.array([r.fits['momentum'].params['beta'] for r in results.subject_results])
+
+    ax.hist(betas, bins=15, density=True, alpha=0.7, color='#FF9800',
+            edgecolor='black', linewidth=0.5, label='Histogram')
+
+    # KDE
+    kde_x = np.linspace(0, max(betas)*1.2, 100)
+    kde = stats.gaussian_kde(betas)
+    ax.plot(kde_x, kde(kde_x), 'r-', lw=2, label='KDE')
+
+    # Statistics
+    ax.axvline(x=0, color='red', linestyle='-', lw=2, label=f'Mean={results.beta_mean:.3f}')
+    ax.axvline(x=results.beta_ci[0], color='red', linestyle='--', alpha=0.7, label='95% CI')
+    ax.axvline(x=results.beta_ci[1], color='red', linestyle='--', alpha=0.7)
+
+    t_stat, p_val = results.beta_ttest
+    ax.text(0.95, 0.95, f't({results.n_subjects-1}) = {t_stat:.2f}\np = {p_val:.3f}',
+           transform=ax.transAxes, ha='right', va='top', fontsize=10,
+           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    ax.set_xlabel('Momentum parameter beta', fontsize=11)
+    ax.set_ylabel('Density', fontsize=11)
+    ax.set_title('B) Distribution of Belief Inertia', fontsize=12, fontweight='bold')
+    ax.legend(loc='upper right', fontsize=8)
+
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        # Also save PDF
+        pdf_path = save_path.with_suffix('.pdf')
+        fig.savefig(pdf_path, dpi=300, bbox_inches='tight')
+        print(f"Saved model comparison figure to {save_path}")
+
+    return fig
+
+
 # =============================================================================
 # LaTeX Output
 # =============================================================================
@@ -1041,6 +1108,12 @@ def run_publication_analysis(output_dir: Optional[Path] = None,
         )
         fig_supp.savefig(output_dir / 'figure_helicopter_supplementary.pdf')
         plt.close(fig_supp)
+
+        fig_comp = create_model_comparison_figure(
+            results,
+            save_path=output_dir / 'helicopter_model_comparison.png'
+        )
+        plt.close(fig_comp)
 
     print("\n" + "=" * 70)
     print("ANALYSIS COMPLETE")
