@@ -61,22 +61,25 @@ class EventDynamics:
     post_sentiment: float
     peak_deviation: float
     damping_ratio: float
-    period_hours: float
+    period_days: float  # Changed from hours to days for daily data
     n_oscillations: int
     r_squared: float
 
 
-def load_election_data(data_dir: str) -> pd.DataFrame:
+def load_election_data(data_dir: str, level: str = 'World') -> pd.DataFrame:
     """
-    Load the sentiment data from various possible locations.
+    Load sentiment data for election analysis.
 
-    Searches for:
-    1. Direct CSV files in the data directory
-    2. "Sentiment Data - XXX" folders (Country, County, State, World)
+    Args:
+        data_dir: Directory containing data
+        level: Which level to load - 'World' (global daily), 'Country', 'State'
+               Default is 'World' for fastest loading and clearest signal
+
+    Searches for "Sentiment Data - XXX" folders.
     """
     import glob as glob_module
 
-    # Direct file names to try
+    # Direct file names to try first
     possible_files = [
         'election2020_tweets.csv',
         'USA_Nov2020_Election_Tweets.csv',
@@ -84,7 +87,6 @@ def load_election_data(data_dir: str) -> pd.DataFrame:
         'data.csv',
     ]
 
-    # Check direct files first
     for fname in possible_files:
         fpath = os.path.join(data_dir, fname)
         if os.path.exists(fpath):
@@ -92,79 +94,71 @@ def load_election_data(data_dir: str) -> pd.DataFrame:
             return _load_csv_file(fpath)
 
     # Search for "Sentiment Data - XXX" folders
-    # Look in current dir, parent dir, and common locations
     search_paths = [
         data_dir,
         os.path.join(data_dir, '..'),
         os.path.join(data_dir, '..', '..'),
-        os.path.join(data_dir, '..', '..', '..'),
+        os.path.join(data_dir, '..', 'sentiment_index'),
     ]
 
     for search_path in search_paths:
-        # Look for sentiment data folders
         pattern = os.path.join(search_path, 'Sentiment Data - *')
         sentiment_folders = glob_module.glob(pattern)
 
         if sentiment_folders:
-            print(f"Found {len(sentiment_folders)} sentiment data folders:")
-            for folder in sentiment_folders:
-                print(f"  - {os.path.basename(folder)}")
+            print(f"Found {len(sentiment_folders)} sentiment data folders")
 
-            # Load from the first folder that has CSV files
+            # Find the requested level
+            target_folder = None
+            for folder in sentiment_folders:
+                folder_name = os.path.basename(folder)
+                folder_level = folder_name.replace('Sentiment Data - ', '')
+                if folder_level == level:
+                    target_folder = folder
+                    break
+
+            if target_folder is None:
+                print(f"  Level '{level}' not found, available:")
+                for folder in sentiment_folders:
+                    print(f"    - {os.path.basename(folder)}")
+                # Fall back to World if available, else first
+                for folder in sentiment_folders:
+                    if 'World' in folder:
+                        target_folder = folder
+                        break
+                if target_folder is None:
+                    target_folder = sentiment_folders[0]
+
+            folder_name = os.path.basename(target_folder)
+            print(f"  Loading from: {folder_name}")
+
             all_dfs = []
-            for folder in sentiment_folders:
-                csv_files = glob_module.glob(os.path.join(folder, '*.csv'))
-                if csv_files:
-                    print(f"\nLoading from: {os.path.basename(folder)}")
-                    for csv_file in csv_files[:5]:  # Limit to first 5 files per folder
-                        try:
-                            df = _load_csv_file(csv_file)
-                            if df is not None and len(df) > 0:
-                                all_dfs.append(df)
-                                print(f"  Loaded {len(df):,} rows from {os.path.basename(csv_file)}")
-                        except Exception as e:
-                            print(f"  Error loading {os.path.basename(csv_file)}: {e}")
+            csv_files = glob_module.glob(os.path.join(target_folder, '*.csv'))
 
-            if all_dfs:
-                combined = pd.concat(all_dfs, ignore_index=True)
-                print(f"\nTotal: {len(combined):,} rows from {len(all_dfs)} files")
-                return combined
-
-    # Search recursively for any CSV with sentiment-related name
-    for search_path in search_paths:
-        csv_files = glob_module.glob(os.path.join(search_path, '**', '*sentiment*.csv'), recursive=True)
-        csv_files += glob_module.glob(os.path.join(search_path, '**', '*election*.csv'), recursive=True)
-
-        if csv_files:
-            print(f"Found {len(csv_files)} potential sentiment files")
-
-            # Prioritize 2020 files for election2020 analysis
-            files_2020 = [f for f in csv_files if '2020' in f]
+            # Prioritize 2020 file
+            files_2020 = [f for f in csv_files if '2020' in os.path.basename(f)]
             if files_2020:
-                print(f"  Found {len(files_2020)} files with '2020' in name")
                 csv_files = files_2020
+                print(f"  Using 2020 file(s): {[os.path.basename(f) for f in files_2020]}")
             else:
-                # Load ALL files and let the date filtering handle it
-                print(f"  No 2020-specific files, loading all and filtering by date")
+                print(f"  Loading all {len(csv_files)} files")
 
-            all_dfs = []
             for fpath in csv_files:
                 try:
                     df = _load_csv_file(fpath)
                     if df is not None and len(df) > 0:
                         all_dfs.append(df)
-                        print(f"  Loaded {len(df):,} rows from {os.path.basename(fpath)}")
+                        print(f"    Loaded {len(df):,} rows from {os.path.basename(fpath)}")
                 except Exception as e:
-                    print(f"  Error loading {os.path.basename(fpath)}: {e}")
+                    print(f"    Error: {e}")
 
             if all_dfs:
                 combined = pd.concat(all_dfs, ignore_index=True)
-                print(f"\nTotal: {len(combined):,} rows from {len(all_dfs)} files")
+                print(f"  Total: {len(combined):,} rows")
                 return combined
 
     raise FileNotFoundError(
-        f"No data file found in {data_dir}. "
-        f"Please place sentiment data in 'Sentiment Data - XXX' folders."
+        f"No data file found. Please place sentiment data in 'Sentiment Data - XXX' folders."
     )
 
 
@@ -261,7 +255,7 @@ def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
 
 def aggregate_sentiment_timeseries(
     df: pd.DataFrame,
-    freq: str = '1H'
+    freq: str = '1D'
 ) -> pd.DataFrame:
     """
     Aggregate sentiment to regular time intervals.
@@ -292,44 +286,46 @@ def aggregate_sentiment_timeseries(
 def fit_damped_oscillator_to_event(
     ts: pd.DataFrame,
     event_time: datetime,
-    window_before_hours: int = 6,
-    window_after_hours: int = 48
+    window_before_days: int = 7,
+    window_after_days: int = 30
 ) -> Optional[EventDynamics]:
     """
     Fit damped oscillator to sentiment dynamics around an event.
 
     Model: y(t) = y_eq + A * exp(-ζωn*t) * cos(ωd*t + φ)
+
+    Note: Uses DAYS since sentiment data is daily resolution.
     """
     # Extract window around event
-    start = event_time - timedelta(hours=window_before_hours)
-    end = event_time + timedelta(hours=window_after_hours)
+    start = event_time - timedelta(days=window_before_days)
+    end = event_time + timedelta(days=window_after_days)
 
     window = ts[(ts['timestamp'] >= start) & (ts['timestamp'] <= end)].copy()
 
-    if len(window) < 20:
+    if len(window) < 10:  # Reduced threshold for daily data
         return None
 
-    # Time in hours from event
-    window['t_hours'] = (window['timestamp'] - event_time).dt.total_seconds() / 3600
+    # Time in DAYS from event
+    window['t_days'] = (window['timestamp'] - event_time).dt.total_seconds() / 86400
 
     # Pre-event baseline
-    pre_data = window[window['t_hours'] < 0]
-    post_data = window[window['t_hours'] >= 0]
+    pre_data = window[window['t_days'] < 0]
+    post_data = window[window['t_days'] >= 0]
 
-    if len(pre_data) < 5 or len(post_data) < 10:
+    if len(pre_data) < 3 or len(post_data) < 5:
         return None
 
     pre_sentiment = pre_data['sentiment_mean'].mean()
 
     # Post-event equilibrium (late in window)
-    late_data = window[window['t_hours'] > window_after_hours * 0.7]
+    late_data = window[window['t_days'] > window_after_days * 0.7]
     if len(late_data) > 0:
         post_sentiment = late_data['sentiment_mean'].mean()
     else:
         post_sentiment = post_data['sentiment_mean'].mean()
 
     # Fit oscillator to post-event data
-    t = post_data['t_hours'].values
+    t = post_data['t_days'].values
     y = post_data['sentiment_mean'].values
     y_dev = y - post_sentiment
 
@@ -342,14 +338,14 @@ def fit_damped_oscillator_to_event(
     n_oscillations = len(crossings) // 2
 
     if n_oscillations > 0 and len(crossings) >= 2:
-        # Average half-period
+        # Average half-period in days
         half_periods = np.diff(t[crossings])
         if len(half_periods) > 0:
-            period_hours = 2 * np.mean(half_periods)
+            period_days = 2 * np.mean(half_periods)
         else:
-            period_hours = 0
+            period_days = 0
     else:
-        period_hours = 0
+        period_days = 0
 
     # Fit exponential envelope to estimate damping
     peaks_idx = signal.find_peaks(np.abs(y_dev))[0]
@@ -361,8 +357,8 @@ def fit_damped_oscillator_to_event(
         try:
             slope, intercept, r, p, se = stats.linregress(peak_times, np.log(peak_vals + 1e-10))
             damping_rate = -slope  # ζωn
-            if period_hours > 0:
-                omega_n = 2 * np.pi / period_hours
+            if period_days > 0:
+                omega_n = 2 * np.pi / period_days
                 damping_ratio = damping_rate / omega_n if omega_n > 0 else 1.0
             else:
                 damping_ratio = 1.0
@@ -374,8 +370,8 @@ def fit_damped_oscillator_to_event(
         r = 0
 
     # Compute overall fit quality
-    if period_hours > 0 and damping_ratio < 2:
-        omega_d = 2 * np.pi / period_hours
+    if period_days > 0 and damping_ratio < 2:
+        omega_d = 2 * np.pi / period_days
         zeta_omega_n = damping_ratio * omega_d / np.sqrt(1 - min(damping_ratio, 0.99)**2) if damping_ratio < 1 else omega_d
         y_pred = peak_deviation * np.exp(-zeta_omega_n * t) * np.cos(omega_d * t)
         ss_res = np.sum((y_dev - y_pred)**2)
@@ -391,7 +387,7 @@ def fit_damped_oscillator_to_event(
         post_sentiment=post_sentiment,
         peak_deviation=peak_deviation,
         damping_ratio=min(damping_ratio, 5.0),
-        period_hours=period_hours,
+        period_days=period_days,
         n_oscillations=n_oscillations,
         r_squared=max(0, r_squared)
     )
@@ -415,7 +411,7 @@ def analyze_all_events(
 
             regime = "underdamped" if dynamics.damping_ratio < 1 else "overdamped"
             print(f"    ζ = {dynamics.damping_ratio:.3f} ({regime})")
-            print(f"    Period = {dynamics.period_hours:.1f} hours")
+            print(f"    Period = {dynamics.period_days:.1f} days")
             print(f"    Oscillations = {dynamics.n_oscillations}")
         else:
             print(f"    Insufficient data")
@@ -457,7 +453,7 @@ def visualize_event_dynamics(
                 ax.axhline(result.post_sentiment, color='orange', ls=':', alpha=0.5)
 
                 regime = "ζ<1 (osc)" if result.damping_ratio < 1 else "ζ>1 (over)"
-                ax.set_title(f"{event_name}\n{regime}, T={result.period_hours:.1f}h", fontsize=10)
+                ax.set_title(f"{event_name}\n{regime}, T={result.period_days:.1f}d", fontsize=10)
             else:
                 ax.set_title(event_name, fontsize=10)
 
@@ -580,7 +576,7 @@ Prediction: Sentiment shows damped oscillation (ζ < 1) after shocks.
                 years = df['timestamp'].dt.year.unique()
                 print(f"  Available years: {sorted(years)}")
 
-        ts = aggregate_sentiment_timeseries(df, freq='1H')
+        ts = aggregate_sentiment_timeseries(df, freq='1D')
     except FileNotFoundError:
         print("\n  No data file found. Using sample data for demonstration...")
         ts = generate_sample_data()
@@ -594,7 +590,7 @@ Prediction: Sentiment shows damped oscillation (ζ < 1) after shocks.
 
     if results:
         zetas = [r.damping_ratio for r in results]
-        periods = [r.period_hours for r in results if r.period_hours > 0]
+        periods = [r.period_days for r in results if r.period_days > 0]
 
         n_underdamped = sum(1 for z in zetas if z < 1)
 
@@ -602,7 +598,7 @@ Prediction: Sentiment shows damped oscillation (ζ < 1) after shocks.
         print(f"   Underdamped (ζ<1): {n_underdamped}/{len(results)}")
         print(f"   Mean damping ratio: {np.mean(zetas):.3f}")
         if periods:
-            print(f"   Mean period: {np.mean(periods):.1f} hours")
+            print(f"   Mean period: {np.mean(periods):.1f} days")
 
     # Visualize
     print("\n[4/4] Creating visualizations...")
