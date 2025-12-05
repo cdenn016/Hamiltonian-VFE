@@ -66,6 +66,387 @@ class EventDynamics:
     r_squared: float
 
 
+@dataclass
+class OscillationSignificance:
+    """Statistical significance tests for oscillation detection."""
+    event_name: str
+    # Model comparison
+    oscillator_aic: float
+    exponential_aic: float
+    model_preference: str  # 'oscillator' or 'exponential'
+    delta_aic: float  # AIC(exponential) - AIC(oscillator), positive = oscillator better
+    # Zero-crossing test
+    observed_crossings: int
+    expected_crossings_random: float
+    crossing_p_value: float
+    # Autocorrelation test
+    acf_oscillation_score: float  # negative ACF at lag ~T/2 indicates oscillation
+    acf_p_value: float
+    # Overall verdict
+    is_significant: bool
+    confidence: str  # 'high', 'medium', 'low'
+
+
+def compute_aic(n: int, rss: float, k: int) -> float:
+    """Compute AIC for a model.
+
+    Args:
+        n: Number of data points
+        rss: Residual sum of squares
+        k: Number of parameters
+
+    Returns:
+        AIC value (lower is better)
+    """
+    if rss <= 0 or n <= k:
+        return np.inf
+    return n * np.log(rss / n) + 2 * k
+
+
+def fit_exponential_decay(t: np.ndarray, y: np.ndarray) -> Tuple[float, float, float]:
+    """Fit simple exponential decay: y = A * exp(-λt) + c
+
+    Returns:
+        (rss, n_params, r_squared)
+    """
+    def exp_model(t, A, lam, c):
+        return A * np.exp(-lam * t) + c
+
+    try:
+        # Initial guesses
+        A0 = y[0] - y[-1]
+        lam0 = 0.1
+        c0 = y[-1]
+
+        popt, _ = optimize.curve_fit(
+            exp_model, t, y,
+            p0=[A0, lam0, c0],
+            maxfev=5000,
+            bounds=([-np.inf, 0, -np.inf], [np.inf, 10, np.inf])
+        )
+
+        y_pred = exp_model(t, *popt)
+        rss = np.sum((y - y_pred)**2)
+        ss_tot = np.sum((y - np.mean(y))**2)
+        r_squared = 1 - rss / ss_tot if ss_tot > 0 else 0
+
+        return rss, 3, r_squared
+    except:
+        return np.inf, 3, 0
+
+
+def fit_damped_oscillator_model(t: np.ndarray, y: np.ndarray) -> Tuple[float, float, float]:
+    """Fit damped oscillator: y = A * exp(-ζωn*t) * cos(ωd*t + φ) + c
+
+    Returns:
+        (rss, n_params, r_squared)
+    """
+    def osc_model(t, A, zeta_omega, omega_d, phi, c):
+        return A * np.exp(-zeta_omega * t) * np.cos(omega_d * t + phi) + c
+
+    try:
+        # Estimate initial frequency from zero crossings
+        crossings = np.where(np.diff(np.sign(y - np.mean(y))))[0]
+        if len(crossings) >= 2:
+            half_periods = np.diff(t[crossings])
+            omega_d0 = np.pi / np.mean(half_periods) if len(half_periods) > 0 else 0.5
+        else:
+            omega_d0 = 0.5
+
+        # Clamp omega_d0 to reasonable range
+        omega_d0 = np.clip(omega_d0, 0.1, 5.0)
+
+        # Initial guesses
+        A0 = np.max(np.abs(y - np.mean(y)))
+        if A0 < 1e-10:
+            A0 = 0.1
+        zeta_omega0 = 0.1
+        phi0 = 0
+        c0 = np.mean(y)
+
+        # Try multiple initial conditions
+        best_rss = np.inf
+        best_r2 = 0
+
+        for omega_init in [omega_d0, omega_d0 * 0.5, omega_d0 * 2, 0.5, 1.0]:
+            for zeta_init in [0.05, 0.1, 0.3]:
+                try:
+                    popt, _ = optimize.curve_fit(
+                        osc_model, t, y,
+                        p0=[A0, zeta_init, omega_init, phi0, c0],
+                        maxfev=2000,
+                        bounds=([-np.inf, 0, 0.01, -np.pi, -np.inf], [np.inf, 5, 10, np.pi, np.inf])
+                    )
+
+                    y_pred = osc_model(t, *popt)
+                    rss = np.sum((y - y_pred)**2)
+                    ss_tot = np.sum((y - np.mean(y))**2)
+                    r2 = 1 - rss / ss_tot if ss_tot > 0 else 0
+
+                    if rss < best_rss:
+                        best_rss = rss
+                        best_r2 = r2
+                except:
+                    continue
+
+        if best_rss == np.inf:
+            # Fallback: use simple sinusoidal fit
+            return np.sum(y**2), 5, 0
+
+        return best_rss, 5, best_r2
+    except:
+        return np.sum(y**2), 5, 0
+
+
+def test_zero_crossings(y: np.ndarray, n_simulations: int = 1000) -> Tuple[int, float, float]:
+    """Test if zero crossings are significantly different from random walk.
+
+    Random walk has fewer crossings than oscillatory signal.
+
+    Returns:
+        (observed_crossings, expected_crossings, p_value)
+    """
+    y_centered = y - np.mean(y)
+    observed = len(np.where(np.diff(np.sign(y_centered)))[0])
+
+    # Simulate random walks with same variance
+    n = len(y)
+    sigma = np.std(np.diff(y_centered))
+
+    random_crossings = []
+    for _ in range(n_simulations):
+        # Random walk
+        rw = np.cumsum(np.random.randn(n) * sigma)
+        rw_centered = rw - np.mean(rw)
+        crossings = len(np.where(np.diff(np.sign(rw_centered)))[0])
+        random_crossings.append(crossings)
+
+    expected = np.mean(random_crossings)
+
+    # One-sided test: oscillation has MORE crossings than random walk
+    p_value = np.mean([c >= observed for c in random_crossings])
+
+    return observed, expected, p_value
+
+
+def test_autocorrelation_oscillation(y: np.ndarray, max_lag: int = 15) -> Tuple[float, float]:
+    """Test for oscillatory autocorrelation structure.
+
+    Oscillation produces negative ACF at intermediate lags.
+    Random walk has monotonically decaying positive ACF.
+
+    Returns:
+        (oscillation_score, p_value)
+    """
+    try:
+        # Compute ACF using numpy (no statsmodels dependency)
+        n = len(y)
+        y_centered = y - np.mean(y)
+        nlags = min(max_lag, n // 3)
+
+        acf_values = []
+        var = np.sum(y_centered**2)
+
+        for lag in range(nlags + 1):
+            if lag == 0:
+                acf_values.append(1.0)
+            else:
+                acf = np.sum(y_centered[:-lag] * y_centered[lag:]) / var
+                acf_values.append(acf)
+
+        acf_values = np.array(acf_values)
+
+        # Oscillation score: magnitude of minimum (most negative) ACF
+        min_acf = np.min(acf_values[1:])  # Exclude lag 0
+        oscillation_score = -min_acf  # Positive if ACF goes negative
+
+        # Test significance using Bartlett's formula
+        se = 1 / np.sqrt(n)  # Standard error under null
+        z_score = oscillation_score / se
+        p_value = 1 - stats.norm.cdf(z_score)  # One-sided
+
+        return oscillation_score, p_value
+    except:
+        return 0, 1.0
+
+
+def compute_phase_coherence(events_data: List[Tuple[np.ndarray, np.ndarray]]) -> Tuple[float, float]:
+    """Compute phase coherence across multiple events.
+
+    If oscillation is real, phase should be consistent across events.
+
+    Args:
+        events_data: List of (t, y) arrays for each event
+
+    Returns:
+        (coherence, p_value) where coherence is 0-1
+    """
+    if len(events_data) < 2:
+        return 0, 1.0
+
+    phases = []
+    for t, y in events_data:
+        if len(y) < 5:
+            continue
+
+        # Find first zero crossing after peak
+        y_centered = y - np.mean(y)
+        crossings = np.where(np.diff(np.sign(y_centered)))[0]
+
+        if len(crossings) > 0:
+            first_crossing_time = t[crossings[0]]
+            phases.append(first_crossing_time)
+
+    if len(phases) < 2:
+        return 0, 1.0
+
+    # Compute circular variance (measures phase consistency)
+    # Normalize to common period
+    mean_phase = np.mean(phases)
+    phase_variance = np.var(phases)
+
+    # Coherence: low variance = high coherence
+    coherence = np.exp(-phase_variance / (mean_phase**2 + 0.01))
+
+    # Rayleigh test for phase uniformity
+    n = len(phases)
+    R = coherence * n
+    p_value = np.exp(-R**2 / n) if n > 0 else 1.0
+
+    return coherence, p_value
+
+
+def validate_oscillation(
+    ts: pd.DataFrame,
+    event_time: datetime,
+    event_name: str,
+    window_after_days: int = 30
+) -> Optional[OscillationSignificance]:
+    """Run statistical tests to validate oscillation detection.
+
+    Tests:
+    1. AIC model comparison: oscillator vs exponential decay
+    2. Zero-crossing test: more crossings than random walk
+    3. Autocorrelation: negative ACF at intermediate lags
+    """
+    # Extract post-event window
+    start = event_time
+    end = event_time + timedelta(days=window_after_days)
+    window = ts[(ts['timestamp'] >= start) & (ts['timestamp'] <= end)].copy()
+
+    if len(window) < 10:
+        return None
+
+    t = (window['timestamp'] - event_time).dt.total_seconds().values / 86400  # Days
+    y = window['sentiment_mean'].values
+    y_centered = y - np.mean(y)
+
+    # 1. Model comparison (AIC)
+    osc_rss, osc_k, osc_r2 = fit_damped_oscillator_model(t, y_centered)
+    exp_rss, exp_k, exp_r2 = fit_exponential_decay(t, np.abs(y_centered))
+
+    osc_aic = compute_aic(len(y), osc_rss, osc_k)
+    exp_aic = compute_aic(len(y), exp_rss, exp_k)
+
+    delta_aic = exp_aic - osc_aic  # Positive = oscillator better
+    model_preference = 'oscillator' if delta_aic > 2 else ('exponential' if delta_aic < -2 else 'neither')
+
+    # 2. Zero-crossing test
+    observed_crossings, expected_crossings, crossing_p = test_zero_crossings(y_centered)
+
+    # 3. Autocorrelation test
+    acf_score, acf_p = test_autocorrelation_oscillation(y_centered)
+
+    # Overall verdict
+    significant_tests = 0
+    if delta_aic > 2:  # Strong preference for oscillator
+        significant_tests += 1
+    if crossing_p < 0.05:  # Significantly more crossings
+        significant_tests += 1
+    if acf_p < 0.05:  # Significant negative ACF
+        significant_tests += 1
+
+    is_significant = significant_tests >= 2
+    confidence = 'high' if significant_tests == 3 else ('medium' if significant_tests == 2 else 'low')
+
+    return OscillationSignificance(
+        event_name=event_name,
+        oscillator_aic=osc_aic,
+        exponential_aic=exp_aic,
+        model_preference=model_preference,
+        delta_aic=delta_aic,
+        observed_crossings=observed_crossings,
+        expected_crossings_random=expected_crossings,
+        crossing_p_value=crossing_p,
+        acf_oscillation_score=acf_score,
+        acf_p_value=acf_p,
+        is_significant=is_significant,
+        confidence=confidence
+    )
+
+
+def run_significance_analysis(
+    ts: pd.DataFrame,
+    events: Dict[str, datetime],
+    results: List[EventDynamics]
+) -> List[OscillationSignificance]:
+    """Run statistical significance tests for all events."""
+    print("\n" + "=" * 70)
+    print("STATISTICAL VALIDATION: Is the oscillation REAL or NOISE?")
+    print("=" * 70)
+
+    significance_results = []
+    events_data = []  # For phase coherence
+
+    for event_name, event_time in events.items():
+        print(f"\n  {event_name}:")
+
+        sig = validate_oscillation(ts, event_time, event_name)
+
+        if sig is not None:
+            significance_results.append(sig)
+
+            # Collect data for phase coherence
+            start = event_time
+            end = event_time + timedelta(days=30)
+            window = ts[(ts['timestamp'] >= start) & (ts['timestamp'] <= end)]
+            if len(window) >= 5:
+                t = (window['timestamp'] - event_time).dt.total_seconds().values / 86400
+                y = window['sentiment_mean'].values
+                events_data.append((t, y - np.mean(y)))
+
+            # Print results
+            print(f"    Model comparison (ΔAIC): {sig.delta_aic:.1f} → {sig.model_preference}")
+            print(f"    Zero-crossings: {sig.observed_crossings} observed vs {sig.expected_crossings_random:.1f} expected (p={sig.crossing_p_value:.3f})")
+            print(f"    ACF oscillation score: {sig.acf_oscillation_score:.3f} (p={sig.acf_p_value:.3f})")
+            print(f"    → Verdict: {'✓ SIGNIFICANT' if sig.is_significant else '✗ Not significant'} ({sig.confidence} confidence)")
+        else:
+            print(f"    Insufficient data for validation")
+
+    # Phase coherence across events
+    if len(events_data) >= 2:
+        coherence, coherence_p = compute_phase_coherence(events_data)
+        print(f"\n  Cross-event phase coherence: {coherence:.3f} (p={coherence_p:.3f})")
+        if coherence > 0.5 and coherence_p < 0.05:
+            print(f"    → Events show CONSISTENT oscillation phase!")
+
+    # Summary
+    if significance_results:
+        n_significant = sum(1 for s in significance_results if s.is_significant)
+        n_high_conf = sum(1 for s in significance_results if s.confidence == 'high')
+
+        print(f"\n  SUMMARY:")
+        print(f"    Significant oscillation: {n_significant}/{len(significance_results)} events")
+        print(f"    High confidence: {n_high_conf}/{len(significance_results)} events")
+
+        if n_significant >= len(significance_results) // 2:
+            print(f"\n  ✓ Oscillation is STATISTICALLY SIGNIFICANT - not just noise!")
+        else:
+            print(f"\n  ⚠ Oscillation evidence is WEAK - may be noise")
+
+    return significance_results
+
+
 def load_election_data(data_dir: str, level: str = 'World') -> pd.DataFrame:
     """
     Load sentiment data for election analysis.
@@ -618,6 +999,10 @@ Prediction: Sentiment shows damped oscillation (ζ < 1) after shocks.
     # Visualize
     print("\n[4/4] Creating visualizations...")
     visualize_event_dynamics(ts, ELECTION_EVENTS, results)
+
+    # Statistical validation
+    print("\n[5/5] Running statistical validation...")
+    significance_results = run_significance_analysis(ts, ELECTION_EVENTS, results)
 
     # Summary
     print("\n" + "=" * 70)
