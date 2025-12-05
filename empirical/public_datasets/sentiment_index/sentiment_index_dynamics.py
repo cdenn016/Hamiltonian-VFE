@@ -60,9 +60,14 @@ class RegionDynamics:
     autocorr_decay: float  # How fast autocorrelation decays
 
 
-def load_tsgi_data(data_dir: str) -> pd.DataFrame:
+def load_tsgi_data(data_dir: str, level: str = 'Country') -> pd.DataFrame:
     """
     Load sentiment data from CSV files.
+
+    Args:
+        data_dir: Directory containing sentiment data
+        level: Which level to load - 'Country', 'State', 'County', or 'World'
+               Default is 'Country' for manageable data size
 
     Searches for:
     1. "Sentiment Data - XXX" folders (Country, County, State, World)
@@ -76,21 +81,36 @@ def load_tsgi_data(data_dir: str) -> pd.DataFrame:
     sentiment_folders = glob_module.glob(os.path.join(data_dir, 'Sentiment Data - *'))
 
     if sentiment_folders:
-        print(f"  Found {len(sentiment_folders)} sentiment data folders:")
+        print(f"  Found {len(sentiment_folders)} sentiment data folders")
+
+        # Only load the requested level to keep data manageable
+        target_folder = None
         for folder in sentiment_folders:
             folder_name = os.path.basename(folder)
-            level = folder_name.replace('Sentiment Data - ', '')
-            print(f"    - {folder_name}")
+            folder_level = folder_name.replace('Sentiment Data - ', '')
+            if folder_level == level:
+                target_folder = folder
+                break
 
-            csv_files = glob_module.glob(os.path.join(folder, '*.csv'))
-            for fpath in csv_files:
-                try:
-                    df = pd.read_csv(fpath, low_memory=False)
-                    df['data_level'] = level  # Track data granularity
-                    dfs.append(df)
-                    print(f"      Loaded {os.path.basename(fpath)}: {len(df):,} records")
-                except Exception as e:
-                    print(f"      Error loading {os.path.basename(fpath)}: {e}")
+        if target_folder is None:
+            print(f"  WARNING: Level '{level}' not found, available:")
+            for folder in sentiment_folders:
+                print(f"    - {os.path.basename(folder)}")
+            # Fall back to first folder
+            target_folder = sentiment_folders[0]
+
+        folder_name = os.path.basename(target_folder)
+        print(f"  Loading from: {folder_name}")
+
+        csv_files = glob_module.glob(os.path.join(target_folder, '*.csv'))
+        for fpath in csv_files:
+            try:
+                df = pd.read_csv(fpath, low_memory=False)
+                df['data_level'] = level
+                dfs.append(df)
+                print(f"    Loaded {os.path.basename(fpath)}: {len(df):,} records")
+            except Exception as e:
+                print(f"    Error loading {os.path.basename(fpath)}: {e}")
 
     # If no folders found, look for direct CSV files
     if not dfs:
@@ -167,8 +187,10 @@ def preprocess_tsgi(df: pd.DataFrame) -> pd.DataFrame:
                 print(f"  Using '{col}' as sentiment")
                 break
 
-    # Find region columns - Country, State, County, etc.
-    region_cols = ['admin0', 'country', 'admin1', 'state', 'region', 'county',
+    # Find region columns - use hierarchical naming (NAME_0=country, NAME_1=state, NAME_2=county)
+    # Priority: most specific geographic column available
+    region_cols = ['name_0', 'name_1', 'name_2',  # Standard geographic hierarchy
+                   'admin0', 'country', 'admin1', 'state', 'region', 'county',
                    'admin2', 'location', 'geo', 'place', 'country_name',
                    'state_name', 'county_name']
     region_found = False
@@ -176,18 +198,12 @@ def preprocess_tsgi(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df['region'] = df[col].astype(str)
             region_found = True
-            print(f"  Using '{col}' as region")
+            print(f"  Using '{col}' as region ({df[col].nunique()} unique values)")
             break
 
     if not region_found:
-        # Use data_level as region if available (from our folder loading)
-        if 'data_level' in df.columns:
-            df['region'] = df['data_level']
-            region_found = True
-            print(f"  Using 'data_level' as region")
-        else:
-            df['region'] = 'global'
-            print(f"  No region column found, using 'global'")
+        df['region'] = 'global'
+        print(f"  No region column found, using 'global'")
 
     if not date_found or not sentiment_found:
         print(f"  WARNING: Missing required columns")
