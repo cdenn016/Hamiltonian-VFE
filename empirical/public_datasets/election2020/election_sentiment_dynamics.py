@@ -260,23 +260,38 @@ def aggregate_sentiment_timeseries(
     """
     Aggregate sentiment to regular time intervals.
 
+    If data is already at daily resolution (one row per day), skip aggregation.
+
     Args:
         df: DataFrame with 'timestamp' and 'sentiment' columns
-        freq: Pandas frequency string (e.g., '1H' for hourly, '15min')
+        freq: Pandas frequency string (e.g., '1D' for daily, '1h' for hourly)
 
     Returns:
         DataFrame with aggregated sentiment statistics
     """
-    df = df.set_index('timestamp')
+    # Check if data is already at daily resolution (one row per unique date)
+    unique_dates = df['timestamp'].dt.date.nunique()
+    if unique_dates == len(df):
+        # Data is already daily - just rename columns
+        print(f"  Data already at daily resolution ({len(df)} days)")
+        result = df[['timestamp', 'sentiment']].copy()
+        result['sentiment_mean'] = result['sentiment']
+        result['sentiment_std'] = 0.0
+        result['tweet_count'] = 1
+        return result
 
-    agg = df.resample(freq).agg({
+    # Aggregate to target frequency
+    df_indexed = df.set_index('timestamp')
+
+    agg = df_indexed.resample(freq).agg({
         'sentiment': ['mean', 'std', 'count']
     })
     agg.columns = ['sentiment_mean', 'sentiment_std', 'tweet_count']
     agg = agg.reset_index()
 
-    # Filter low-count periods
-    agg = agg[agg['tweet_count'] >= 10]
+    # Filter low-count periods (only if we have granular data)
+    if freq in ['1h', '1H', '15min', '30min']:
+        agg = agg[agg['tweet_count'] >= 10]
 
     print(f"  Aggregated to {len(agg)} time periods ({freq})")
 
