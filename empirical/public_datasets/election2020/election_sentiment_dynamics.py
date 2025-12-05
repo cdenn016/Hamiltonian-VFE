@@ -891,7 +891,7 @@ def plot_fitted_trajectories_fixed(
             'angular_freq_omega_d': traj.angular_freq,
             'natural_freq_omega_n': traj.natural_freq,
             'phase_phi': traj.phase,
-            'offset_baseline': traj.offset,
+            'offset_baseline': traj.baseline,
             'period_days': traj.period_days,
             'decay_time_days': traj.decay_time,
             'r2_oscillator': traj.r2_oscillator,

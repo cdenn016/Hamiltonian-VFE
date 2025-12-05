@@ -839,8 +839,8 @@ def plot_fitted_event_trajectories_fixed(
         ax.axvline(0, color='green', ls='-', lw=2.5, alpha=0.8, label='Event')
 
         t_post = traj.t[traj.t >= 0]
-        envelope_upper = traj.offset + traj.amplitude * np.exp(-traj.damping_coeff * t_post)
-        envelope_lower = traj.offset - traj.amplitude * np.exp(-traj.damping_coeff * t_post)
+        envelope_upper = traj.equilibrium + np.abs(traj.amplitude) * np.exp(-traj.damping_coeff * t_post)
+        envelope_lower = traj.equilibrium - np.abs(traj.amplitude) * np.exp(-traj.damping_coeff * t_post)
         ax.fill_between(t_post, envelope_lower, envelope_upper,
                         alpha=0.2, color='blue', label='Decay envelope')
 
@@ -895,7 +895,7 @@ def plot_fitted_event_trajectories_fixed(
             'damping_coeff_zeta_omega': traj.damping_coeff,
             'angular_freq_omega_d': traj.angular_freq,
             'phase_phi': traj.phase,
-            'offset_baseline': traj.offset,
+            'offset_baseline': traj.baseline,
             'period_days': traj.period_days,
             'decay_time_days': traj.decay_time,
             'r2_oscillator': traj.r2_oscillator,
