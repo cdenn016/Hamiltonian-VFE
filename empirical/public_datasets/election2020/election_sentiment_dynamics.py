@@ -758,31 +758,9 @@ def plot_fitted_trajectories_fixed(
                 f"τ={traj.decay_time:.1f}d, ΔAIC={delta_aic:.1f} ({better})")
         ax.set_title(title, fontsize=11, fontweight='bold')
 
-        # Parameter box - FIXED labels
-        param_text = (
-            f"y(t) = y_eq + A·exp(-γt)·cos(ωd·t + φ)\n"
-            f"{'─'*32}\n"
-            f"A (amplitude)    = {traj.amplitude:+.5f}\n"
-            f"γ (decay rate)   = {traj.damping_coeff:.4f} /day\n"
-            f"ωd (damped freq) = {traj.angular_freq:.4f} rad/day\n"
-            f"ωn (natural freq)= {traj.natural_freq:.4f} rad/day\n"
-            f"φ (phase)        = {traj.phase:.4f} rad\n"
-            f"y_eq (equil.)    = {traj.equilibrium:.5f}\n"
-            f"{'─'*32}\n"
-            f"ζ (damping)      = {traj.damping_ratio:.4f}\n"
-            f"T = 2π/ωd        = {traj.period_days:.2f} days\n"
-            f"τ = 1/γ          = {traj.decay_time:.2f} days\n"
-            f"Δy (shift)       = {traj.equilibrium - traj.baseline:+.5f}"
-        )
-
-        props = dict(boxstyle='round,pad=0.5', facecolor='wheat', alpha=0.8)
-        ax.text(0.02, 0.98, param_text, transform=ax.transAxes, fontsize=8,
-                verticalalignment='top', fontfamily='monospace', bbox=props)
-
-        print(f"    ζ={traj.damping_ratio:.3f}, T={traj.period_days:.1f}d")
-        print(f"    Shift: {traj.baseline:.4f} → {traj.equilibrium:.4f} (Δ={traj.equilibrium-traj.baseline:+.4f})")
-        print(f"    R²(osc)={traj.r2_oscillator:.3f}, R²(exp)={traj.r2_exponential:.3f}")
-        print(f"    ΔAIC={delta_aic:.1f} → {better}")
+        print(f"    ζ = {traj.damping_ratio:.3f}, T = {traj.period_days:.1f} days")
+        print(f"    R²(osc) = {traj.r2_oscillator:.3f}, R²(exp) = {traj.r2_exponential:.3f}")
+        print(f"    ΔAIC = {delta_aic:.1f} → {better} model preferred")
 
     plt.tight_layout()
 
@@ -837,32 +815,6 @@ def plot_fitted_trajectories_fixed(
             fontsize=13, fontweight='bold'
         )
 
-        # Detailed parameter box
-        param_text = (
-            f"Damped Oscillator: y(t) = y_eq + A·exp(-γt)·cos(ωd·t + φ)\n"
-            f"{'━'*40}\n"
-            f"Amplitude A        = {traj.amplitude:+.6f}\n"
-            f"Decay rate γ       = {traj.damping_coeff:.5f} /day\n"
-            f"Damped freq ωd     = {traj.angular_freq:.5f} rad/day\n"
-            f"Natural freq ωn    = {traj.natural_freq:.5f} rad/day\n"
-            f"Phase φ            = {traj.phase:.5f} rad\n"
-            f"Equilibrium y_eq   = {traj.equilibrium:.6f}\n"
-            f"Baseline           = {traj.baseline:.6f}\n"
-            f"{'━'*40}\n"
-            f"Damping ratio ζ    = {traj.damping_ratio:.5f}\n"
-            f"Period T = 2π/ωd   = {traj.period_days:.3f} days\n"
-            f"Decay time τ = 1/γ = {traj.decay_time:.3f} days\n"
-            f"Shift Δy           = {traj.equilibrium - traj.baseline:+.6f}\n"
-            f"{'━'*40}\n"
-            f"R² (oscillator)    = {traj.r2_oscillator:.4f}\n"
-            f"R² (exponential)   = {traj.r2_exponential:.4f}\n"
-            f"ΔAIC               = {delta_aic:.2f} → {better}"
-        )
-
-        props = dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.9)
-        ax.text(0.02, 0.98, param_text, transform=ax.transAxes, fontsize=9,
-                verticalalignment='top', fontfamily='monospace', bbox=props)
-
         plt.tight_layout()
         single_path = os.path.join(output_dir, f'trajectory_{traj.event_name}_fixed.png')
         plt.savefig(single_path, dpi=150, bbox_inches='tight', facecolor='white')
@@ -887,6 +839,35 @@ def plot_fitted_trajectories_fixed(
               f"{traj.r2_exponential:>8.4f} {delta_aic:>8.2f} {better:>12}")
 
     print("-" * 105)
+
+    # Save parameters to CSV
+    params_data = []
+    for traj in trajectories:
+        delta_aic = traj.aic_exponential - traj.aic_oscillator
+        better = "oscillator" if delta_aic > 2 else ("exponential" if delta_aic < -2 else "neither")
+        params_data.append({
+            'event': traj.event_name,
+            'amplitude_A': traj.amplitude,
+            'damping_ratio_zeta': traj.damping_ratio,
+            'damping_coeff_zeta_omega': traj.damping_coeff,
+            'angular_freq_omega_d': traj.angular_freq,
+            'natural_freq_omega_n': traj.natural_freq,
+            'phase_phi': traj.phase,
+            'offset_baseline': traj.offset,
+            'period_days': traj.period_days,
+            'decay_time_days': traj.decay_time,
+            'r2_oscillator': traj.r2_oscillator,
+            'r2_exponential': traj.r2_exponential,
+            'aic_oscillator': traj.aic_oscillator,
+            'aic_exponential': traj.aic_exponential,
+            'delta_aic': delta_aic,
+            'preferred_model': better
+        })
+
+    params_df = pd.DataFrame(params_data)
+    csv_path = os.path.join(output_dir, 'fitted_parameters.csv')
+    params_df.to_csv(csv_path, index=False)
+    print(f"\n  Parameters saved to: {csv_path}")
 
     return trajectories
 

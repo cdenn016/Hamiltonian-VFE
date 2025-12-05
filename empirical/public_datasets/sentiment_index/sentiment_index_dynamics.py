@@ -770,36 +770,62 @@ def plot_fitted_event_trajectories_fixed(
                 f"τ={traj.decay_time:.1f}d, ΔAIC={delta_aic:.1f} ({better})")
         ax.set_title(title, fontsize=11, fontweight='bold')
 
-        # Parameter box - FIXED labels
-        param_text = (
-            f"y(t) = y_eq + A·exp(-γt)·cos(ωd·t + φ)\n"
-            f"{'─'*30}\n"
-            f"A (amplitude)    = {traj.amplitude:+.5f}\n"
-            f"γ (decay rate)   = {traj.damping_coeff:.4f} /day\n"
-            f"ωd (damped freq) = {traj.angular_freq:.4f} rad/day\n"
-            f"φ (phase)        = {traj.phase:.4f} rad\n"
-            f"y_eq (equil.)    = {traj.equilibrium:.5f}\n"
-            f"{'─'*30}\n"
-            f"ζ (damping)      = {traj.damping_ratio:.4f}\n"
-            f"T = 2π/ωd        = {traj.period_days:.2f} days\n"
-            f"τ = 1/γ          = {traj.decay_time:.2f} days\n"
-            f"Δy (shift)       = {traj.equilibrium - traj.baseline:+.5f}"
-        )
-
-        props = dict(boxstyle='round,pad=0.5', facecolor='wheat', alpha=0.85)
-        ax.text(0.02, 0.98, param_text, transform=ax.transAxes, fontsize=8,
-                verticalalignment='top', fontfamily='monospace', bbox=props)
-
-        print(f"    ζ={traj.damping_ratio:.3f}, T={traj.period_days:.1f}d, n={traj.n_points}")
-        print(f"    Shift: {traj.baseline:.4f} → {traj.equilibrium:.4f} (Δ={traj.equilibrium-traj.baseline:+.4f})")
-        print(f"    R²(osc)={traj.r2_oscillator:.3f}, R²(exp)={traj.r2_exponential:.3f}")
-        print(f"    ΔAIC={delta_aic:.1f} → {better}")
+        print(f"    ζ = {traj.damping_ratio:.3f}, T = {traj.period_days:.1f} days, n = {traj.n_points}")
+        print(f"    R²(osc) = {traj.r2_oscillator:.3f}, R²(exp) = {traj.r2_exponential:.3f}")
+        print(f"    ΔAIC = {delta_aic:.1f} → {better} model preferred")
 
     plt.tight_layout()
     save_path = os.path.join(output_dir, 'sentiment_fitted_trajectories_fixed.png')
     plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     print(f"\n  Saved to: {save_path}")
+
+    # Individual plots
+    for traj in trajectories:
+        event_time = events[traj.event_name]
+        fig_single, ax = plt.subplots(figsize=(12, 6))
+
+        start = event_time - timedelta(days=7)
+        end = event_time + timedelta(days=30)
+        window = df[(df['date'] >= start) & (df['date'] <= end)]
+        daily = window.groupby('date').agg({'sentiment': 'mean'}).reset_index()
+        daily['t_days'] = (daily['date'] - event_time).dt.days
+        t_data = daily['t_days'].values
+        y_data = daily['sentiment'].values
+
+        ax.scatter(t_data, y_data, s=80, c='black', alpha=0.8, zorder=5, label=f'Observed Data (n={traj.n_points})')
+        ax.plot(traj.t, traj.y_oscillator, 'b-', lw=3,
+                label=f'Damped Oscillator (R²={traj.r2_oscillator:.3f})')
+        ax.plot(traj.t, traj.y_exponential, 'r--', lw=2.5, alpha=0.8,
+                label=f'Exponential Decay (R²={traj.r2_exponential:.3f})')
+        ax.axvline(0, color='green', ls='-', lw=2.5, alpha=0.8, label='Event')
+
+        t_post = traj.t[traj.t >= 0]
+        envelope_upper = traj.offset + traj.amplitude * np.exp(-traj.damping_coeff * t_post)
+        envelope_lower = traj.offset - traj.amplitude * np.exp(-traj.damping_coeff * t_post)
+        ax.fill_between(t_post, envelope_lower, envelope_upper,
+                        alpha=0.2, color='blue', label='Decay envelope')
+
+        ax.set_xlabel('Days from Event', fontsize=12)
+        ax.set_ylabel('Global Sentiment', fontsize=12)
+        ax.set_xlim(-8, 32)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper right', fontsize=10)
+
+        regime = "UNDERDAMPED" if traj.damping_ratio < 1 else "OVERDAMPED"
+        delta_aic = traj.aic_exponential - traj.aic_oscillator
+        better = "oscillator" if delta_aic > 2 else ("exponential" if delta_aic < -2 else "tie")
+
+        ax.set_title(
+            f"Sentiment Dynamics: {traj.event_name.replace('_', ' ').title()}\n"
+            f"{regime} (ζ = {traj.damping_ratio:.3f}, T = {traj.period_days:.1f} days)",
+            fontsize=13, fontweight='bold'
+        )
+
+        plt.tight_layout()
+        single_path = os.path.join(output_dir, f'trajectory_{traj.event_name}.png')
+        plt.savefig(single_path, dpi=150, bbox_inches='tight', facecolor='white')
+        plt.close(fig_single)
 
     # Summary table
     print("\n" + "=" * 100)
@@ -817,6 +843,35 @@ def plot_fitted_event_trajectories_fixed(
               f"{traj.period_days:>7.1f} {traj.decay_time:>7.1f} {shift:>+8.4f} "
               f"{traj.r2_oscillator:>7.3f} {traj.r2_exponential:>7.3f} "
               f"{delta_aic:>8.1f} {better:>10}")
+
+    # Save parameters to CSV
+    params_data = []
+    for traj in trajectories:
+        delta_aic = traj.aic_exponential - traj.aic_oscillator
+        better = "oscillator" if delta_aic > 2 else ("exponential" if delta_aic < -2 else "neither")
+        params_data.append({
+            'event': traj.event_name,
+            'n_points': traj.n_points,
+            'amplitude_A': traj.amplitude,
+            'damping_ratio_zeta': traj.damping_ratio,
+            'damping_coeff_zeta_omega': traj.damping_coeff,
+            'angular_freq_omega_d': traj.angular_freq,
+            'phase_phi': traj.phase,
+            'offset_baseline': traj.offset,
+            'period_days': traj.period_days,
+            'decay_time_days': traj.decay_time,
+            'r2_oscillator': traj.r2_oscillator,
+            'r2_exponential': traj.r2_exponential,
+            'aic_oscillator': traj.aic_oscillator,
+            'aic_exponential': traj.aic_exponential,
+            'delta_aic': delta_aic,
+            'preferred_model': better
+        })
+
+    params_df = pd.DataFrame(params_data)
+    csv_path = os.path.join(output_dir, 'sentiment_fitted_parameters.csv')
+    params_df.to_csv(csv_path, index=False)
+    print(f"\n  Parameters saved to: {csv_path}")
 
     return trajectories
 
