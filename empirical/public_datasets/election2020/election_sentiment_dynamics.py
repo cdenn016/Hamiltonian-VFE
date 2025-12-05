@@ -714,8 +714,22 @@ def plot_fitted_trajectories_fixed(
         t_data = (window['timestamp'] - event_time).dt.total_seconds().values / 86400
         y_data = window['sentiment_mean'].values
 
-        # Plot data points
-        ax.scatter(t_data, y_data, s=50, c='black', alpha=0.7, zorder=5, label='Data')
+        # Calculate standard error for error bars
+        if 'sentiment_std' in window.columns and 'tweet_count' in window.columns:
+            y_std = window['sentiment_std'].values
+            n_tweets = window['tweet_count'].values
+            # Standard error = std / sqrt(n)
+            y_err = y_std / np.sqrt(np.maximum(n_tweets, 1))
+        else:
+            y_err = None
+
+        # Plot data points with error bars
+        if y_err is not None:
+            ax.errorbar(t_data, y_data, yerr=y_err, fmt='o', ms=6, c='black',
+                       alpha=0.7, zorder=5, capsize=2, capthick=1, elinewidth=1,
+                       label=f'Data (±SE, n={len(t_data)})')
+        else:
+            ax.scatter(t_data, y_data, s=50, c='black', alpha=0.7, zorder=5, label='Data')
 
         # Plot fitted oscillator
         ax.plot(traj.t, traj.y_oscillator, 'b-', lw=2.5,
@@ -779,7 +793,16 @@ def plot_fitted_trajectories_fixed(
         t_data = (window['timestamp'] - event_time).dt.total_seconds().values / 86400
         y_data = window['sentiment_mean'].values
 
-        ax.scatter(t_data, y_data, s=80, c='black', alpha=0.8, zorder=5, label='Observed Data')
+        # Calculate standard error for error bars
+        if 'sentiment_std' in window.columns and 'tweet_count' in window.columns:
+            y_std = window['sentiment_std'].values
+            n_tweets = window['tweet_count'].values
+            y_err = y_std / np.sqrt(np.maximum(n_tweets, 1))
+            ax.errorbar(t_data, y_data, yerr=y_err, fmt='o', ms=8, c='black',
+                       alpha=0.8, zorder=5, capsize=3, capthick=1, elinewidth=1,
+                       label=f'Observed Data (±SE, n={len(t_data)})')
+        else:
+            ax.scatter(t_data, y_data, s=80, c='black', alpha=0.8, zorder=5, label='Observed Data')
         ax.plot(traj.t, traj.y_oscillator, 'b-', lw=3,
                 label=f'Damped Oscillator (R²={traj.r2_oscillator:.3f})')
         ax.plot(traj.t, traj.y_exponential, 'r--', lw=2.5, alpha=0.8,
@@ -1264,7 +1287,16 @@ def visualize_event_dynamics(
         if len(window) > 0:
             # Plot
             t_hours = (window['timestamp'] - event_time).dt.total_seconds() / 3600
-            ax.plot(t_hours, window['sentiment_mean'], 'b-', alpha=0.7, lw=1)
+            y_mean = window['sentiment_mean'].values
+
+            # Add error band if std and count available
+            if 'sentiment_std' in window.columns and 'tweet_count' in window.columns:
+                y_std = window['sentiment_std'].values
+                n_tweets = window['tweet_count'].values
+                y_err = y_std / np.sqrt(np.maximum(n_tweets, 1))
+                ax.fill_between(t_hours, y_mean - y_err, y_mean + y_err,
+                               alpha=0.3, color='blue', label='±SE')
+            ax.plot(t_hours, y_mean, 'b-', alpha=0.7, lw=1)
             ax.axvline(0, color='red', ls='--', lw=2, label='Event')
 
             # Find corresponding result
