@@ -730,26 +730,6 @@ def plot_fitted_trajectories(
                 f"ΔAIC = {delta_aic:.1f} ({better})")
         ax.set_title(title, fontsize=11, fontweight='bold')
 
-        # Add parameter box
-        param_text = (
-            f"Oscillator Model: y(t) = A·exp(-ζωₙt)·cos(ωdt + φ) + c\n"
-            f"────────────────────────────────\n"
-            f"A (amplitude)     = {traj.amplitude:.4f}\n"
-            f"ζ (damping ratio) = {traj.damping_ratio:.4f}\n"
-            f"ωd (angular freq) = {traj.angular_freq:.4f} rad/day\n"
-            f"ωn (natural freq) = {traj.natural_freq:.4f} rad/day\n"
-            f"φ (phase)         = {traj.phase:.4f} rad\n"
-            f"c (offset)        = {traj.offset:.4f}\n"
-            f"────────────────────────────────\n"
-            f"Period T = 2π/ωd  = {traj.period_days:.2f} days\n"
-            f"Decay τ = 1/ζωn   = {traj.decay_time:.2f} days"
-        )
-
-        # Position text box
-        props = dict(boxstyle='round,pad=0.5', facecolor='wheat', alpha=0.8)
-        ax.text(0.02, 0.98, param_text, transform=ax.transAxes, fontsize=8,
-                verticalalignment='top', fontfamily='monospace', bbox=props)
-
         print(f"    ζ = {traj.damping_ratio:.3f}, T = {traj.period_days:.1f} days")
         print(f"    R²(osc) = {traj.r2_oscillator:.3f}, R²(exp) = {traj.r2_exponential:.3f}")
         print(f"    ΔAIC = {delta_aic:.1f} → {better} model preferred")
@@ -801,28 +781,6 @@ def plot_fitted_trajectories(
             fontsize=13, fontweight='bold'
         )
 
-        param_text = (
-            f"Damped Oscillator: y(t) = A·exp(-ζωₙt)·cos(ωdt + φ) + c\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Amplitude A        = {traj.amplitude:.5f}\n"
-            f"Damping ratio ζ    = {traj.damping_ratio:.5f}\n"
-            f"Damped freq ωd     = {traj.angular_freq:.5f} rad/day\n"
-            f"Natural freq ωn    = {traj.natural_freq:.5f} rad/day\n"
-            f"Phase φ            = {traj.phase:.5f} rad\n"
-            f"Offset c           = {traj.offset:.5f}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Period T = 2π/ωd   = {traj.period_days:.3f} days\n"
-            f"Decay time τ       = {traj.decay_time:.3f} days\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"R² (oscillator)    = {traj.r2_oscillator:.4f}\n"
-            f"R² (exponential)   = {traj.r2_exponential:.4f}\n"
-            f"ΔAIC               = {delta_aic:.2f} → {better}"
-        )
-
-        props = dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.9)
-        ax.text(0.02, 0.98, param_text, transform=ax.transAxes, fontsize=9,
-                verticalalignment='top', fontfamily='monospace', bbox=props)
-
         plt.tight_layout()
         single_path = os.path.join(output_dir, f'trajectory_{traj.event_name}.png')
         plt.savefig(single_path, dpi=150, bbox_inches='tight', facecolor='white')
@@ -845,6 +803,35 @@ def plot_fitted_trajectories(
               f"{delta_aic:>10.2f} {better:>12}")
 
     print("-" * 90)
+
+    # Save parameters to CSV
+    params_data = []
+    for traj in trajectories:
+        delta_aic = traj.aic_exponential - traj.aic_oscillator
+        better = "oscillator" if delta_aic > 2 else ("exponential" if delta_aic < -2 else "neither")
+        params_data.append({
+            'event': traj.event_name,
+            'amplitude_A': traj.amplitude,
+            'damping_ratio_zeta': traj.damping_ratio,
+            'damping_coeff_zeta_omega': traj.damping_coeff,
+            'angular_freq_omega_d': traj.angular_freq,
+            'natural_freq_omega_n': traj.natural_freq,
+            'phase_phi': traj.phase,
+            'offset_baseline': traj.offset,
+            'period_days': traj.period_days,
+            'decay_time_days': traj.decay_time,
+            'r2_oscillator': traj.r2_oscillator,
+            'r2_exponential': traj.r2_exponential,
+            'aic_oscillator': traj.aic_oscillator,
+            'aic_exponential': traj.aic_exponential,
+            'delta_aic': delta_aic,
+            'preferred_model': better
+        })
+
+    params_df = pd.DataFrame(params_data)
+    csv_path = os.path.join(output_dir, 'fitted_parameters.csv')
+    params_df.to_csv(csv_path, index=False)
+    print(f"\n  Parameters saved to: {csv_path}")
 
     return trajectories
 
