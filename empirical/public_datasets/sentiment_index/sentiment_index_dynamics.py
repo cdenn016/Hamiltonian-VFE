@@ -441,11 +441,13 @@ def visualize_results(
             daily = result['daily_data']
             t_days = daily['t_days'].values
             y_mean = daily['sentiment_mean'].values
-            # Add error bars if std and count available
+            # Add error bars with floor for systematic uncertainties
+            UNCERTAINTY_FLOOR = 0.02
             if 'sentiment_std' in daily.columns and 'count' in daily.columns:
                 y_std = daily['sentiment_std'].values
                 n_count = daily['count'].values
-                y_err = y_std / np.sqrt(np.maximum(n_count, 1))
+                se = y_std / np.sqrt(np.maximum(n_count, 1))
+                y_err = np.sqrt(se**2 + UNCERTAINTY_FLOOR**2)
                 ax.errorbar(t_days, y_mean, yerr=y_err, fmt='o-',
                            label=name, alpha=0.7, markersize=4, capsize=2,
                            color=colors[idx % len(colors)])
@@ -741,15 +743,22 @@ def plot_fitted_event_trajectories_fixed(
         t_data = daily['t_days'].values
         y_data = daily['sentiment_mean'].values
 
-        # Calculate standard error for error bars
+        # Calculate uncertainty with floor for systematic errors
+        # Pure SE can be misleadingly small; add floor for VADER accuracy, autocorrelation, etc.
+        UNCERTAINTY_FLOOR = 0.02
         y_std = daily['sentiment_std'].values
         n_count = daily['count'].values
-        y_err = y_std / np.sqrt(np.maximum(n_count, 1))
+        se = y_std / np.sqrt(np.maximum(n_count, 1))
+        y_err = np.sqrt(se**2 + UNCERTAINTY_FLOOR**2)
+
+        # Print diagnostic info
+        print(f"    Error bars: SE range [{se.min():.4f}, {se.max():.4f}], "
+              f"with floor → [{y_err.min():.4f}, {y_err.max():.4f}]")
 
         # Plot data with error bars
         ax.errorbar(t_data, y_data, yerr=y_err, fmt='o', ms=6, c='black',
                    alpha=0.8, zorder=5, capsize=2, capthick=1, elinewidth=1,
-                   label=f'Data (±SE, n={traj.n_points})')
+                   label=f'Data (±σ, n={traj.n_points})')
         
         # Plot fits
         ax.plot(traj.t, traj.y_oscillator, 'b-', lw=2.5,
@@ -813,14 +822,16 @@ def plot_fitted_event_trajectories_fixed(
         t_data = daily['t_days'].values
         y_data = daily['sentiment_mean'].values
 
-        # Calculate standard error for error bars
+        # Calculate uncertainty with floor for systematic errors
+        UNCERTAINTY_FLOOR = 0.02
         y_std = daily['sentiment_std'].values
         n_count = daily['count'].values
-        y_err = y_std / np.sqrt(np.maximum(n_count, 1))
+        se = y_std / np.sqrt(np.maximum(n_count, 1))
+        y_err = np.sqrt(se**2 + UNCERTAINTY_FLOOR**2)
 
         ax.errorbar(t_data, y_data, yerr=y_err, fmt='o', ms=8, c='black',
                    alpha=0.8, zorder=5, capsize=3, capthick=1, elinewidth=1,
-                   label=f'Observed Data (±SE, n={traj.n_points})')
+                   label=f'Observed Data (±σ, n={traj.n_points})')
         ax.plot(traj.t, traj.y_oscillator, 'b-', lw=3,
                 label=f'Damped Oscillator (R²={traj.r2_oscillator:.3f})')
         ax.plot(traj.t, traj.y_exponential, 'r--', lw=2.5, alpha=0.8,
@@ -828,8 +839,8 @@ def plot_fitted_event_trajectories_fixed(
         ax.axvline(0, color='green', ls='-', lw=2.5, alpha=0.8, label='Event')
 
         t_post = traj.t[traj.t >= 0]
-        envelope_upper = traj.offset + traj.amplitude * np.exp(-traj.damping_coeff * t_post)
-        envelope_lower = traj.offset - traj.amplitude * np.exp(-traj.damping_coeff * t_post)
+        envelope_upper = traj.equilibrium + np.abs(traj.amplitude) * np.exp(-traj.damping_coeff * t_post)
+        envelope_lower = traj.equilibrium - np.abs(traj.amplitude) * np.exp(-traj.damping_coeff * t_post)
         ax.fill_between(t_post, envelope_lower, envelope_upper,
                         alpha=0.2, color='blue', label='Decay envelope')
 
@@ -884,7 +895,7 @@ def plot_fitted_event_trajectories_fixed(
             'damping_coeff_zeta_omega': traj.damping_coeff,
             'angular_freq_omega_d': traj.angular_freq,
             'phase_phi': traj.phase,
-            'offset_baseline': traj.offset,
+            'offset_baseline': traj.baseline,
             'period_days': traj.period_days,
             'decay_time_days': traj.decay_time,
             'r2_oscillator': traj.r2_oscillator,
