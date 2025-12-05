@@ -60,7 +60,7 @@ class RegionDynamics:
     autocorr_decay: float  # How fast autocorrelation decays
 
 
-def load_tsgi_data(data_dir: str, level: str = 'Country') -> pd.DataFrame:
+def load_tsgi_data(data_dir: str, level: str = 'State') -> pd.DataFrame:
     """
     Load sentiment data from CSV files.
 
@@ -455,22 +455,40 @@ def visualize_results(
     print(f"\nSaved figure to: {save_path}")
 
 
+"""
+Complete fixed versions of trajectory fitting and plotting.
+These replace the corresponding functions in sentiment_index_dynamics.py
+(and can be adapted for election_sentiment_dynamics.py)
+"""
+
+import numpy as np
+import pandas as pd
+from scipy import optimize
+from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
+from typing import Optional, Dict, List
+import os
+
+
 @dataclass
 class FittedEventTrajectory:
     """Fitted model parameters for an event response."""
     event_name: str
-    t: np.ndarray  # Time array (days)
-    y_data: np.ndarray  # Observed data
-    y_oscillator: np.ndarray  # Fitted oscillator prediction
-    y_exponential: np.ndarray  # Fitted exponential prediction
+    t: np.ndarray
+    y_data: np.ndarray
+    y_oscillator: np.ndarray
+    y_exponential: np.ndarray
     # Oscillator parameters
     amplitude: float
-    damping_coeff: float  # ζωn
-    angular_freq: float  # ωd
+    damping_coeff: float  # γ = ζωn (decay rate)
+    angular_freq: float   # ωd (damped frequency)
     phase: float
-    offset: float
+    equilibrium: float    # y_eq - what the system settles to
+    baseline: float       # pre-event value (for reference)
     # Derived quantities
-    damping_ratio: float
+    damping_ratio: float  # ζ
+    natural_freq: float   # ωn
     period_days: float
     decay_time: float
     # Fit quality
@@ -488,7 +506,7 @@ def compute_aic(n: int, rss: float, k: int) -> float:
     return n * np.log(rss / n) + 2 * k
 
 
-def fit_event_trajectory(
+def fit_event_trajectory_fixed(
     df: pd.DataFrame,
     event_time: datetime,
     event_name: str,
@@ -496,89 +514,98 @@ def fit_event_trajectory(
     window_after: int = 30
 ) -> Optional[FittedEventTrajectory]:
     """
-    Fit damped oscillator and exponential decay to event response.
+    FIXED: Fit damped oscillator and exponential decay to event response.
+    
+    Key fixes:
+    1. Fit equilibrium as a parameter (system settles to NEW state)
+    2. Appropriate frequency bounds for the observation window
+    3. Proper model: y = y_eq + A*exp(-γt)*cos(ωd*t + φ)
     """
     start = event_time - timedelta(days=window_before)
     end = event_time + timedelta(days=window_after)
 
     window = df[(df['date'] >= start) & (df['date'] <= end)]
-
     if len(window) < 10:
         return None
 
     # Aggregate globally by day
-    daily = window.groupby('date').agg({
-        'sentiment': 'mean'
-    }).reset_index()
+    daily = window.groupby('date').agg({'sentiment': 'mean'}).reset_index()
     daily.columns = ['date', 'sentiment_mean']
     daily = daily.sort_values('date')
-
-    # Time relative to event
     daily['t_days'] = (daily['date'] - event_time).dt.days
 
     t_full = daily['t_days'].values.astype(float)
     y_full = daily['sentiment_mean'].values
 
-    # Get pre-event baseline
     pre_mask = t_full < 0
     post_mask = t_full >= 0
 
-    if np.sum(pre_mask) >= 2:
-        baseline = np.mean(y_full[pre_mask])
-    else:
-        baseline = y_full[0]
-
-    # Focus on post-event data for fitting
-    t = t_full[post_mask]
-    y = y_full[post_mask]
-
-    if len(t) < 5:
+    if np.sum(pre_mask) < 2 or np.sum(post_mask) < 5:
         return None
 
-    # Deviation from baseline (not from post-event mean!)
-    y_dev = y - baseline
+    # Pre-event baseline (for reference)
+    baseline = np.mean(y_full[pre_mask])
+    
+    # Post-event data
+    t = t_full[post_mask]
+    y = y_full[post_mask]
+    
+    # Estimate equilibrium from late-window data
+    late_mask = t > window_after * 0.6
+    if np.sum(late_mask) >= 3:
+        equilibrium_est = np.mean(y[late_mask])
+    else:
+        equilibrium_est = np.mean(y[-5:]) if len(y) >= 5 else y[-1]
 
-    # === Fit damped oscillator: y = baseline + A * exp(-ζωn*t) * cos(ωd*t + φ) ===
-    def osc_model(t, A, zeta_omega, omega_d, phi):
-        return A * np.exp(-zeta_omega * t) * np.cos(omega_d * t + phi)
+    # === DAMPED OSCILLATOR: y = y_eq + A * exp(-γt) * cos(ωd*t + φ) ===
+    def osc_model(t, A, gamma, omega_d, phi, y_eq):
+        return y_eq + A * np.exp(-gamma * t) * np.cos(omega_d * t + phi)
+
+    # Initial amplitude
+    A0 = y[0] - equilibrium_est
+    if abs(A0) < 1e-6:
+        A0 = np.max(np.abs(y - equilibrium_est))
+    if abs(A0) < 1e-6:
+        A0 = 0.01
+
+    # Frequency bounds based on observation window
+    min_period = 3    # days - Nyquist for daily data
+    max_period = window_after * 0.8  # Need 1+ cycles
+    omega_min = 2 * np.pi / max_period
+    omega_max = 2 * np.pi / min_period
 
     # Estimate initial frequency from zero crossings
-    crossings = np.where(np.diff(np.sign(y_dev)))[0]
+    y_centered = y - equilibrium_est
+    crossings = np.where(np.diff(np.sign(y_centered)))[0]
     if len(crossings) >= 2:
         half_periods = np.diff(t[crossings])
-        omega_d0 = np.pi / np.mean(half_periods) if len(half_periods) > 0 else 0.5
+        omega_d0 = np.pi / np.mean(half_periods)
+        omega_d0 = np.clip(omega_d0, omega_min, omega_max)
     else:
-        omega_d0 = 2 * np.pi / 10  # ~10 day period default
-
-    omega_d0 = np.clip(omega_d0, 0.1, 3.0)
-
-    # Initial amplitude from first deviation
-    A0 = y_dev[0] if len(y_dev) > 0 else 0.1
-    if abs(A0) < 1e-10:
-        A0 = np.max(np.abs(y_dev)) if np.max(np.abs(y_dev)) > 1e-10 else 0.1
+        omega_d0 = 2 * np.pi / 14  # Default ~2 week
 
     best_osc_params = None
     best_osc_rss = np.inf
 
-    # Search over more initial conditions
-    omega_candidates = [omega_d0, omega_d0 * 0.5, omega_d0 * 2,
-                        2*np.pi/7, 2*np.pi/14, 2*np.pi/21, 0.3, 0.6, 0.9]
-    zeta_candidates = [0.01, 0.03, 0.05, 0.1, 0.2, 0.3, 0.5]
-    phi_candidates = [0, np.pi/6, np.pi/3, np.pi/2, 2*np.pi/3, np.pi, -np.pi/6, -np.pi/3, -np.pi/2]
+    # Search grid
+    omega_opts = [omega_d0, 2*np.pi/7, 2*np.pi/10, 2*np.pi/14, 2*np.pi/21]
+    gamma_opts = [0.03, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5]
+    phi_opts = [0, np.pi/4, np.pi/2, 3*np.pi/4, np.pi, -np.pi/4, -np.pi/2]
 
-    for omega_init in omega_candidates:
-        for zeta_init in zeta_candidates:
-            for phi_init in phi_candidates:
+    for omega_init in omega_opts:
+        for gamma_init in gamma_opts:
+            for phi_init in phi_opts:
                 try:
                     popt, _ = optimize.curve_fit(
-                        osc_model, t, y_dev,
-                        p0=[A0, zeta_init, omega_init, phi_init],
-                        maxfev=2000,
-                        bounds=([-np.inf, 0.001, 0.05, -np.pi],
-                               [np.inf, 2, 3, np.pi])
+                        osc_model, t, y,
+                        p0=[A0, gamma_init, omega_init, phi_init, equilibrium_est],
+                        maxfev=3000,
+                        bounds=(
+                            [-0.5, 0.001, omega_min, -np.pi, y.min() - 0.1],
+                            [0.5, 2.0, omega_max, np.pi, y.max() + 0.1]
+                        )
                     )
-                    y_pred = osc_model(t, *popt)
-                    rss = np.sum((y_dev - y_pred)**2)
+                    rss = np.sum((y - osc_model(t, *popt))**2)
                     if rss < best_osc_rss:
                         best_osc_rss = rss
                         best_osc_params = popt
@@ -586,62 +613,50 @@ def fit_event_trajectory(
                     continue
 
     if best_osc_params is None:
-        best_osc_params = [A0, 0.1, omega_d0, 0]
-        best_osc_rss = np.sum(y_dev**2)
+        best_osc_params = [A0, 0.1, omega_d0, 0, equilibrium_est]
+        best_osc_rss = np.sum((y - equilibrium_est)**2)
 
-    A, zeta_omega, omega_d, phi = best_osc_params
+    A, gamma, omega_d, phi, y_eq_osc = best_osc_params
 
-    # === Fit exponential decay: y = A * exp(-λt) ===
-    def exp_model(t, A_exp, lam):
-        return A_exp * np.exp(-lam * t)
+    # === EXPONENTIAL DECAY: y = y_eq + A * exp(-λt) ===
+    def exp_model(t, A_exp, lam, y_eq):
+        return y_eq + A_exp * np.exp(-lam * t)
 
     try:
         popt_exp, _ = optimize.curve_fit(
-            exp_model, t, y_dev,
-            p0=[A0, 0.1],
-            maxfev=2000,
-            bounds=([-np.inf, 0.001], [np.inf, 2])
+            exp_model, t, y,
+            p0=[A0, 0.1, equilibrium_est],
+            maxfev=3000,
+            bounds=([-0.5, 0.001, y.min()-0.1], [0.5, 2.0, y.max()+0.1])
         )
-        y_exp_pred = exp_model(t, *popt_exp)
-        exp_rss = np.sum((y_dev - y_exp_pred)**2)
+        exp_rss = np.sum((y - exp_model(t, *popt_exp))**2)
     except:
-        popt_exp = [A0, 0.1]
-        exp_rss = np.sum(y_dev**2)
+        popt_exp = [A0, 0.1, equilibrium_est]
+        exp_rss = np.sum((y - equilibrium_est)**2)
 
-    # Compute R² and AIC
-    ss_tot = np.sum((y_dev - np.mean(y_dev))**2)
+    # === Fit quality ===
+    ss_tot = np.sum((y - np.mean(y))**2)
     r2_osc = 1 - best_osc_rss / ss_tot if ss_tot > 0 else 0
     r2_exp = 1 - exp_rss / ss_tot if ss_tot > 0 else 0
 
     n = len(y)
-    aic_osc = compute_aic(n, best_osc_rss, 4)  # 4 params (no offset)
-    aic_exp = compute_aic(n, exp_rss, 2)  # 2 params
+    aic_osc = compute_aic(n, best_osc_rss, 5)
+    aic_exp = compute_aic(n, exp_rss, 3)
 
-    # Derive physical parameters
-    if omega_d > 0:
-        zeta_sq = zeta_omega**2 / (omega_d**2 + zeta_omega**2)
-        zeta = np.sqrt(zeta_sq)
-    else:
-        zeta = 1.0
-
+    # === Derived parameters ===
+    omega_n = np.sqrt(omega_d**2 + gamma**2)
+    zeta = gamma / omega_n if omega_n > 0 else 1.0
     period = 2 * np.pi / omega_d if omega_d > 0 else np.inf
-    decay_time = 1 / zeta_omega if zeta_omega > 0 else np.inf
+    decay_time = 1 / gamma if gamma > 0 else np.inf
 
-    # Generate smooth predictions
+    # === Smooth predictions ===
     t_smooth = np.linspace(t_full.min(), t_full.max(), 200)
+    y_osc_smooth = np.full_like(t_smooth, baseline)
+    y_exp_smooth = np.full_like(t_smooth, baseline)
 
-    y_osc_smooth = np.zeros_like(t_smooth)
-    y_exp_smooth = np.zeros_like(t_smooth)
-
-    # Pre-event: use baseline
-    pre_mask_smooth = t_smooth < 0
-    y_osc_smooth[pre_mask_smooth] = baseline
-    y_exp_smooth[pre_mask_smooth] = baseline
-
-    # Post-event: use fitted models + baseline
-    post_mask_smooth = t_smooth >= 0
-    y_osc_smooth[post_mask_smooth] = baseline + osc_model(t_smooth[post_mask_smooth], A, zeta_omega, omega_d, phi)
-    y_exp_smooth[post_mask_smooth] = baseline + exp_model(t_smooth[post_mask_smooth], *popt_exp)
+    post_smooth = t_smooth >= 0
+    y_osc_smooth[post_smooth] = osc_model(t_smooth[post_smooth], *best_osc_params)
+    y_exp_smooth[post_smooth] = exp_model(t_smooth[post_smooth], *popt_exp)
 
     return FittedEventTrajectory(
         event_name=event_name,
@@ -650,11 +665,13 @@ def fit_event_trajectory(
         y_oscillator=y_osc_smooth,
         y_exponential=y_exp_smooth,
         amplitude=A,
-        damping_coeff=zeta_omega,
+        damping_coeff=gamma,
         angular_freq=omega_d,
         phase=phi,
-        offset=baseline,
+        equilibrium=y_eq_osc,
+        baseline=baseline,
         damping_ratio=zeta,
+        natural_freq=omega_n,
         period_days=period,
         decay_time=decay_time,
         r2_oscillator=max(0, r2_osc),
@@ -665,25 +682,24 @@ def fit_event_trajectory(
     )
 
 
-def plot_fitted_event_trajectories(
+def plot_fitted_event_trajectories_fixed(
     df: pd.DataFrame,
     events: Dict[str, datetime],
     output_dir: str
 ) -> List[FittedEventTrajectory]:
     """
-    Generate fitted trajectory plots for each event.
+    FIXED: Generate fitted trajectory plots with correct envelope.
     """
     print("\n" + "=" * 70)
-    print("GENERATING FITTED EVENT TRAJECTORIES")
+    print("GENERATING FITTED EVENT TRAJECTORIES (FIXED)")
     print("=" * 70)
 
     trajectories = []
     valid_events = []
 
-    # First pass: fit all events
     for event_name, event_time in events.items():
         if df['date'].min() <= event_time <= df['date'].max():
-            traj = fit_event_trajectory(df, event_time, event_name)
+            traj = fit_event_trajectory_fixed(df, event_time, event_name)
             if traj is not None:
                 trajectories.append(traj)
                 valid_events.append((event_name, event_time))
@@ -692,9 +708,8 @@ def plot_fitted_event_trajectories(
         print("  No events with sufficient data")
         return []
 
-    # Create figure
     n_events = len(trajectories)
-    fig, axes = plt.subplots(n_events, 1, figsize=(14, 4 * n_events))
+    fig, axes = plt.subplots(n_events, 1, figsize=(14, 4.5 * n_events))
     if n_events == 1:
         axes = [axes]
 
@@ -704,7 +719,7 @@ def plot_fitted_event_trajectories(
 
         print(f"\n  {event_name}:")
 
-        # Get data points for plotting
+        # Get data points
         start = event_time - timedelta(days=7)
         end = event_time + timedelta(days=30)
         window = df[(df['date'] >= start) & (df['date'] <= end)]
@@ -713,18 +728,29 @@ def plot_fitted_event_trajectories(
         t_data = daily['t_days'].values
         y_data = daily['sentiment'].values
 
-        # Plot
-        ax.scatter(t_data, y_data, s=60, c='black', alpha=0.8, zorder=5, label=f'Data (n={traj.n_points})')
+        # Plot data
+        ax.scatter(t_data, y_data, s=60, c='black', alpha=0.8, zorder=5,
+                   label=f'Data (n={traj.n_points})')
+        
+        # Plot fits
         ax.plot(traj.t, traj.y_oscillator, 'b-', lw=2.5,
                 label=f'Damped Oscillator (R²={traj.r2_oscillator:.3f})')
         ax.plot(traj.t, traj.y_exponential, 'r--', lw=2, alpha=0.7,
                 label=f'Exponential Decay (R²={traj.r2_exponential:.3f})')
+        
+        # Event line
         ax.axvline(0, color='green', ls='-', lw=2, alpha=0.7, label='Event')
+        
+        # Reference lines for baseline and equilibrium
+        ax.axhline(traj.baseline, color='gray', ls=':', alpha=0.5, 
+                   label=f'Baseline={traj.baseline:.4f}')
+        ax.axhline(traj.equilibrium, color='purple', ls=':', alpha=0.5,
+                   label=f'Equilibrium={traj.equilibrium:.4f}')
 
-        # Decay envelope
+        # FIXED: Decay envelope centered on EQUILIBRIUM
         t_post = traj.t[traj.t >= 0]
-        envelope_upper = traj.offset + traj.amplitude * np.exp(-traj.damping_coeff * t_post)
-        envelope_lower = traj.offset - traj.amplitude * np.exp(-traj.damping_coeff * t_post)
+        envelope_upper = traj.equilibrium + np.abs(traj.amplitude) * np.exp(-traj.damping_coeff * t_post)
+        envelope_lower = traj.equilibrium - np.abs(traj.amplitude) * np.exp(-traj.damping_coeff * t_post)
         ax.fill_between(t_post, envelope_lower, envelope_upper,
                         alpha=0.15, color='blue', label='Decay envelope')
 
@@ -732,7 +758,7 @@ def plot_fitted_event_trajectories(
         ax.set_ylabel('Global Sentiment', fontsize=11)
         ax.set_xlim(-8, 32)
         ax.grid(True, alpha=0.3)
-        ax.legend(loc='upper right', fontsize=9)
+        ax.legend(loc='upper right', fontsize=8)
 
         # Title
         regime = "UNDERDAMPED" if traj.damping_ratio < 1 else "OVERDAMPED"
@@ -740,10 +766,8 @@ def plot_fitted_event_trajectories(
         better = "oscillator" if delta_aic > 2 else ("exponential" if delta_aic < -2 else "tie")
 
         title = (f"{event_name.replace('_', ' ').title()} - {event_time.strftime('%Y-%m-%d')}\n"
-                f"{regime} (ζ = {traj.damping_ratio:.3f}), "
-                f"T = {traj.period_days:.1f} days, "
-                f"τ = {traj.decay_time:.1f} days, "
-                f"ΔAIC = {delta_aic:.1f} ({better})")
+                f"{regime} (ζ={traj.damping_ratio:.3f}), T={traj.period_days:.1f}d, "
+                f"τ={traj.decay_time:.1f}d, ΔAIC={delta_aic:.1f} ({better})")
         ax.set_title(title, fontsize=11, fontweight='bold')
 
         print(f"    ζ = {traj.damping_ratio:.3f}, T = {traj.period_days:.1f} days, n = {traj.n_points}")
@@ -751,9 +775,9 @@ def plot_fitted_event_trajectories(
         print(f"    ΔAIC = {delta_aic:.1f} → {better} model preferred")
 
     plt.tight_layout()
-
-    save_path = os.path.join(output_dir, 'sentiment_index_fitted_trajectories.png')
+    save_path = os.path.join(output_dir, 'sentiment_fitted_trajectories_fixed.png')
     plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
     print(f"\n  Saved to: {save_path}")
 
     # Individual plots
@@ -803,22 +827,22 @@ def plot_fitted_event_trajectories(
         plt.savefig(single_path, dpi=150, bbox_inches='tight', facecolor='white')
         plt.close(fig_single)
 
-    plt.close(fig)
-
     # Summary table
-    print("\n" + "=" * 95)
+    print("\n" + "=" * 100)
     print("FITTED PARAMETERS SUMMARY")
-    print("=" * 95)
-    print(f"{'Event':<22} {'n':>5} {'ζ':>8} {'T(days)':>10} {'τ(days)':>10} {'R²(osc)':>10} {'R²(exp)':>10} {'ΔAIC':>10}")
-    print("-" * 95)
+    print("=" * 100)
+    print(f"{'Event':<20} {'n':>4} {'ζ':>7} {'T(d)':>7} {'τ(d)':>7} "
+          f"{'Δy':>8} {'R²osc':>7} {'R²exp':>7} {'ΔAIC':>8} {'Better':>10}")
+    print("-" * 100)
 
     for traj in trajectories:
         delta_aic = traj.aic_exponential - traj.aic_oscillator
-        print(f"{traj.event_name:<22} {traj.n_points:>5} {traj.damping_ratio:>8.4f} "
-              f"{traj.period_days:>10.2f} {traj.decay_time:>10.2f} "
-              f"{traj.r2_oscillator:>10.4f} {traj.r2_exponential:>10.4f} {delta_aic:>10.2f}")
-
-    print("-" * 95)
+        better = "oscillator" if delta_aic > 2 else ("exponential" if delta_aic < -2 else "neither")
+        shift = traj.equilibrium - traj.baseline
+        print(f"{traj.event_name:<20} {traj.n_points:>4} {traj.damping_ratio:>7.3f} "
+              f"{traj.period_days:>7.1f} {traj.decay_time:>7.1f} {shift:>+8.4f} "
+              f"{traj.r2_oscillator:>7.3f} {traj.r2_exponential:>7.3f} "
+              f"{delta_aic:>8.1f} {better:>10}")
 
     # Save parameters to CSV
     params_data = []
@@ -977,7 +1001,7 @@ Analyzing:
 
     # Generate fitted trajectory plots
     print("\n[6/6] Generating fitted trajectory plots...")
-    trajectories = plot_fitted_event_trajectories(df, GLOBAL_EVENTS, OUTPUT_DIR)
+    trajectories = plot_fitted_event_trajectories_fixed(df, GLOBAL_EVENTS, OUTPUT_DIR)
 
     # Final summary
     print("\n" + "=" * 70)
