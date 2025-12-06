@@ -137,6 +137,8 @@ class VFEHamiltonian(BeliefHamiltonian):
     - Observations: -∫ χ_i E_q[log p(o|x)] dc
 
     This uses REAL Agent objects and compute_total_free_energy()!
+
+    **NOW WITH ANALYTICAL GRADIENTS** for stable integration!
     """
 
     def __init__(
@@ -144,6 +146,7 @@ class VFEHamiltonian(BeliefHamiltonian):
         agent: Agent,
         system: MultiAgentSystem = None,
         lambda_self: float = 1.0,
+        use_analytical_gradient: bool = True,  # NEW: Use analytical gradient
     ):
         """
         Initialize VFE-based Hamiltonian.
@@ -152,11 +155,13 @@ class VFEHamiltonian(BeliefHamiltonian):
             agent: REAL Agent object with beliefs q, priors p, gauge φ
             system: Optional MultiAgentSystem for multi-agent VFE terms
             lambda_self: Self-coupling strength (used if no system)
+            use_analytical_gradient: If True, use analytical gradient (more stable)
         """
         self.agent = agent
         self.system = system
         self.lambda_self = lambda_self
         self._K = agent.K
+        self.use_analytical_gradient = use_analytical_gradient
 
         # Cache for gradient computation
         self._grad_eps = 1e-5
@@ -197,6 +202,70 @@ class VFEHamiltonian(BeliefHamiltonian):
                 self.agent._L_q_cache = None
 
         return float(vfe)
+
+    def _analytical_gradient(self, q: np.ndarray) -> np.ndarray:
+        """
+        Analytical gradient of VFE w.r.t. belief mean μ.
+
+        For self-energy KL(N(μ_q, Σ_q) || N(μ_p, Σ_p)):
+            ∇_μ KL = Σ_p^{-1} (μ_q - μ_p)
+
+        This is MUCH more stable than numerical gradients!
+        """
+        mu_q = q
+        mu_p = self.agent.mu_p
+        Sigma_p = self.agent.Sigma_p
+
+        # Compute precision of prior
+        try:
+            Lambda_p = np.linalg.inv(Sigma_p)
+        except np.linalg.LinAlgError:
+            Lambda_p = np.linalg.inv(Sigma_p + 1e-6 * np.eye(Sigma_p.shape[0]))
+
+        # Gradient: λ_self * Λ_p (μ_q - μ_p)
+        grad = self.lambda_self * Lambda_p @ (mu_q - mu_p)
+
+        return grad
+
+    def equations_of_motion(
+        self,
+        q: np.ndarray,
+        p: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Hamilton's equations with ANALYTICAL gradients for stability.
+
+        dq/dt = G^{-1} p
+        dp/dt = -∇V(q)
+        """
+        # Get metric (Fisher = precision)
+        G = self.metric(q)
+        try:
+            G_inv = np.linalg.inv(G)
+        except np.linalg.LinAlgError:
+            G_inv = np.linalg.inv(G + 1e-6 * np.eye(len(G)))
+
+        # dq/dt = G^{-1} p
+        dq_dt = G_inv @ p
+
+        # dp/dt = -∇V
+        if self.use_analytical_gradient and self.system is None:
+            # Use analytical gradient (stable!)
+            grad_V = self._analytical_gradient(q)
+        else:
+            # Fall back to numerical gradient for multi-agent systems
+            eps = self._grad_eps
+            grad_V = np.zeros_like(q)
+            for i in range(len(q)):
+                q_plus = q.copy()
+                q_plus[i] += eps
+                q_minus = q.copy()
+                q_minus[i] -= eps
+                grad_V[i] = (self.potential(q_plus) - self.potential(q_minus)) / (2 * eps)
+
+        dp_dt = -grad_V
+
+        return dq_dt, dp_dt
 
     def _fisher_metric(self, q: np.ndarray) -> np.ndarray:
         """
