@@ -13,6 +13,9 @@ Damping Regimes and Epistemic Momentum Simulations
 Comprehensive simulations demonstrating the Hamiltonian dynamics of belief
 evolution from "The Inertia of Belief: Hiding in Plain Sight" manuscript.
 
+**Now utilizing the core dynamics suite** for proper Hamiltonian mechanics
+and symplectic integration.
+
 Simulations implemented:
 1. Three Damping Regimes - Overdamped, critically damped, underdamped
 2. Two-Agent Momentum Transfer - Recoil effect visualization
@@ -36,18 +39,22 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from pathlib import Path
-from typing import Tuple, Dict, List, Optional
+from typing import Tuple, Dict, List, Optional, Callable
 from dataclasses import dataclass
 from scipy.integrate import solve_ivp
 
+# Import from core dynamics suite
+from dynamics.hamiltonian import BeliefHamiltonian, HamiltonianState
+from dynamics.integrators import Verlet, PEFRL, SymplecticIntegrator
+
 
 # =============================================================================
-# Core Dynamics Classes
+# Core Dynamics Classes - Built on Core Suite
 # =============================================================================
 
 @dataclass
 class BeliefState:
-    """State of a single agent's belief."""
+    """State of a single agent's belief (wraps HamiltonianState)."""
     mu: float           # Belief mean (position)
     pi: float           # Belief momentum
     precision: float    # Λ = 1/σ² (acts as mass)
@@ -60,6 +67,14 @@ class BeliefState:
     @property
     def velocity(self) -> float:
         return self.pi / self.mass
+
+    def to_hamiltonian_state(self) -> HamiltonianState:
+        """Convert to core suite HamiltonianState."""
+        return HamiltonianState(
+            q=np.array([self.mu]),
+            p=np.array([self.pi]),
+            t=self.t
+        )
 
 
 @dataclass
@@ -74,10 +89,20 @@ class TwoAgentState:
     coupling: float     # β₁₂ = β₂₁ attention coupling
     t: float = 0.0
 
+    def to_hamiltonian_state(self) -> HamiltonianState:
+        """Convert to core suite HamiltonianState for 2-agent system."""
+        return HamiltonianState(
+            q=np.array([self.mu1, self.mu2]),
+            p=np.array([self.pi1, self.pi2]),
+            t=self.t
+        )
+
 
 class EpistemicOscillator:
     """
     Damped epistemic oscillator from Eq. 36-37 of manuscript.
+
+    **Built on BeliefHamiltonian from core dynamics suite.**
 
     M μ̈ + γ μ̇ + K(μ - μ*) = f(t)
 
@@ -100,6 +125,27 @@ class EpistemicOscillator:
         self.K = stiffness
         self.gamma = damping
         self.mu_eq = equilibrium
+
+        # Build core suite Hamiltonian
+        self._hamiltonian = self._create_hamiltonian()
+
+    def _create_hamiltonian(self) -> BeliefHamiltonian:
+        """Create BeliefHamiltonian from core dynamics suite."""
+        # Harmonic potential: V(μ) = (1/2) K (μ - μ*)²
+        def potential(q: np.ndarray) -> float:
+            mu = q[0] if len(q.shape) > 0 else q
+            return 0.5 * self.K * (mu - self.mu_eq)**2
+
+        # Metric: G = M (scalar mass as 1x1 matrix)
+        def metric(q: np.ndarray) -> np.ndarray:
+            return np.array([[self.M]])
+
+        return BeliefHamiltonian(potential=potential, metric=metric)
+
+    @property
+    def hamiltonian(self) -> BeliefHamiltonian:
+        """Access underlying core suite Hamiltonian."""
+        return self._hamiltonian
 
     @property
     def natural_frequency(self) -> float:
@@ -144,25 +190,31 @@ class EpistemicOscillator:
         self,
         t: float,
         y: np.ndarray,
-        forcing: Optional[callable] = None
+        forcing: Optional[Callable] = None
     ) -> np.ndarray:
         """
         Hamilton's equations with damping.
+
+        Uses core suite's equations_of_motion and adds damping.
 
         dy/dt = [dμ/dt, dπ/dt]
               = [π/M, -K(μ - μ*) - γ·(π/M) + f(t)]
         """
         mu, pi = y
+        q = np.array([mu])
+        p = np.array([pi])
+
+        # Get conservative dynamics from core Hamiltonian
+        dq_dt, dp_dt = self._hamiltonian.equations_of_motion(q, p)
 
         # Velocity
-        dmu_dt = pi / self.M
+        dmu_dt = dq_dt[0]
 
-        # Force: -∂V/∂μ - damping + external
-        force_potential = -self.K * (mu - self.mu_eq)
+        # Add damping and external forcing
         force_damping = -self.gamma * dmu_dt
         force_external = forcing(t) if forcing else 0.0
 
-        dpi_dt = force_potential + force_damping + force_external
+        dpi_dt = dp_dt[0] + force_damping + force_external
 
         return np.array([dmu_dt, dpi_dt])
 
@@ -172,9 +224,28 @@ class EpistemicOscillator:
         pi0: float,
         t_end: float,
         dt: float = 0.01,
-        forcing: Optional[callable] = None
+        forcing: Optional[Callable] = None,
+        use_symplectic: bool = False
     ) -> Dict[str, np.ndarray]:
-        """Simulate belief evolution."""
+        """
+        Simulate belief evolution.
+
+        Args:
+            mu0: Initial belief position
+            pi0: Initial momentum
+            t_end: Simulation end time
+            dt: Time step
+            forcing: Optional external forcing function f(t)
+            use_symplectic: If True and no damping/forcing, use Verlet integrator
+
+        Returns:
+            Dictionary with trajectory data
+        """
+        # For conservative systems (no damping, no forcing), use symplectic
+        if use_symplectic and self.gamma == 0 and forcing is None:
+            return self._simulate_symplectic(mu0, pi0, t_end, dt)
+
+        # For dissipative systems, use scipy (damping breaks symplecticity)
         t_span = (0, t_end)
         t_eval = np.arange(0, t_end, dt)
         y0 = np.array([mu0, pi0])
@@ -197,10 +268,96 @@ class EpistemicOscillator:
             'potential_energy': 0.5 * self.K * (sol.y[0] - self.mu_eq)**2,
         }
 
+    def _simulate_symplectic(
+        self,
+        mu0: float,
+        pi0: float,
+        t_end: float,
+        dt: float
+    ) -> Dict[str, np.ndarray]:
+        """Use Verlet integrator from core suite for conservative dynamics."""
+        integrator = Verlet(self._hamiltonian)
+
+        q0 = np.array([mu0])
+        p0 = np.array([pi0])
+
+        t_arr, q_arr, p_arr, stats = integrator.integrate(
+            q0, p0,
+            t_span=(0.0, t_end),
+            dt=dt
+        )
+
+        mu_arr = q_arr[:, 0]
+        pi_arr = p_arr[:, 0]
+
+        return {
+            't': t_arr,
+            'mu': mu_arr,
+            'pi': pi_arr,
+            'velocity': pi_arr / self.M,
+            'kinetic_energy': 0.5 * pi_arr**2 / self.M,
+            'potential_energy': 0.5 * self.K * (mu_arr - self.mu_eq)**2,
+            'integrator_stats': stats,
+        }
+
+
+class TwoAgentHamiltonian(BeliefHamiltonian):
+    """
+    Hamiltonian for two coupled agents, extending core suite.
+
+    H = T₁ + T₂ + V_prior₁ + V_prior₂ + V_coupling
+
+    Where:
+    - T_i = π_i²/(2M_i) kinetic energy
+    - V_prior_i = (Λ̄/2)(μ_i - μ̄_i)² prior anchoring
+    - V_coupling = (β/2)[M₂(μ₁ - μ₂)² + M₁(μ₂ - μ₁)²] consensus
+    """
+
+    def __init__(
+        self,
+        precision1: float,
+        precision2: float,
+        coupling: float,
+        prior1: float = 0.0,
+        prior2: float = 0.0,
+        prior_strength: float = 0.1,
+    ):
+        self.M1 = precision1
+        self.M2 = precision2
+        self.beta = coupling
+        self.mu_bar1 = prior1
+        self.mu_bar2 = prior2
+        self.Lambda_bar = prior_strength
+
+        # Initialize parent with our potential and metric
+        super().__init__(
+            potential=self._potential,
+            metric=self._metric
+        )
+
+    def _potential(self, q: np.ndarray) -> float:
+        """Total potential energy."""
+        mu1, mu2 = q[0], q[1]
+
+        # Prior anchoring
+        V_prior1 = 0.5 * self.Lambda_bar * (mu1 - self.mu_bar1)**2
+        V_prior2 = 0.5 * self.Lambda_bar * (mu2 - self.mu_bar2)**2
+
+        # Consensus coupling
+        V_coupling = 0.5 * self.beta * (self.M1 + self.M2) * (mu1 - mu2)**2
+
+        return V_prior1 + V_prior2 + V_coupling
+
+    def _metric(self, q: np.ndarray) -> np.ndarray:
+        """Mass matrix (diagonal: [M1, M2])."""
+        return np.diag([self.M1, self.M2])
+
 
 class TwoAgentSystem:
     """
     Two coupled agents with momentum transfer (Section 4.6).
+
+    **Built on TwoAgentHamiltonian from core dynamics suite.**
 
     M₁μ̈₁ + γ₁μ̇₁ = -Λ̄₁(μ₁ - μ̄₁) - β₁₂Λ₂(μ₁ - μ₂)
     M₂μ̈₂ + γ₂μ̇₂ = -Λ̄₂(μ₂ - μ̄₂) - β₂₁Λ₁(μ₂ - μ₁)
@@ -228,34 +385,44 @@ class TwoAgentSystem:
         self.mu_bar2 = prior2
         self.Lambda_bar = prior_strength
 
+        # Build core suite Hamiltonian
+        self._hamiltonian = TwoAgentHamiltonian(
+            precision1=precision1,
+            precision2=precision2,
+            coupling=coupling,
+            prior1=prior1,
+            prior2=prior2,
+            prior_strength=prior_strength,
+        )
+
+    @property
+    def hamiltonian(self) -> TwoAgentHamiltonian:
+        """Access underlying core suite Hamiltonian."""
+        return self._hamiltonian
+
     def equations_of_motion(self, t: float, y: np.ndarray) -> np.ndarray:
         """
-        Coupled Hamilton's equations.
+        Coupled Hamilton's equations with damping.
+
+        Uses core suite's equations_of_motion and adds damping.
 
         y = [μ₁, μ₂, π₁, π₂]
         """
         mu1, mu2, pi1, pi2 = y
+        q = np.array([mu1, mu2])
+        p = np.array([pi1, pi2])
+
+        # Get conservative dynamics from core Hamiltonian
+        dq_dt, dp_dt = self._hamiltonian.equations_of_motion(q, p)
 
         # Velocities
-        v1 = pi1 / self.M1
-        v2 = pi2 / self.M2
+        v1, v2 = dq_dt[0], dq_dt[1]
 
-        # Forces on agent 1
-        force_prior1 = -self.Lambda_bar * (mu1 - self.mu_bar1)
-        force_consensus1 = -self.beta * self.M2 * (mu1 - mu2)  # Pull toward agent 2
-        force_damping1 = -self.gamma1 * v1
+        # Add damping
+        dp1_dt = dp_dt[0] - self.gamma1 * v1
+        dp2_dt = dp_dt[1] - self.gamma2 * v2
 
-        # Forces on agent 2
-        force_prior2 = -self.Lambda_bar * (mu2 - self.mu_bar2)
-        force_consensus2 = -self.beta * self.M1 * (mu2 - mu1)  # Pull toward agent 1
-        force_damping2 = -self.gamma2 * v2
-
-        return np.array([
-            v1,  # dμ₁/dt
-            v2,  # dμ₂/dt
-            force_prior1 + force_consensus1 + force_damping1,  # dπ₁/dt
-            force_prior2 + force_consensus2 + force_damping2,  # dπ₂/dt
-        ])
+        return np.array([v1, v2, dp1_dt, dp2_dt])
 
     def simulate(
         self,
@@ -264,9 +431,20 @@ class TwoAgentSystem:
         pi1_0: float,
         pi2_0: float,
         t_end: float,
-        dt: float = 0.01
+        dt: float = 0.01,
+        use_symplectic: bool = False
     ) -> Dict[str, np.ndarray]:
-        """Simulate two-agent dynamics."""
+        """
+        Simulate two-agent dynamics.
+
+        Args:
+            use_symplectic: If True and no damping, use Verlet integrator
+        """
+        # For conservative systems, use symplectic integrator
+        if use_symplectic and self.gamma1 == 0 and self.gamma2 == 0:
+            return self._simulate_symplectic(mu1_0, mu2_0, pi1_0, pi2_0, t_end, dt)
+
+        # For dissipative systems, use scipy
         t_span = (0, t_end)
         t_eval = np.arange(0, t_end, dt)
         y0 = np.array([mu1_0, mu2_0, pi1_0, pi2_0])
@@ -291,6 +469,40 @@ class TwoAgentSystem:
             'pi2': sol.y[3],
             'total_momentum': total_momentum,
             'momentum_diff': sol.y[2] - sol.y[3],
+        }
+
+    def _simulate_symplectic(
+        self,
+        mu1_0: float,
+        mu2_0: float,
+        pi1_0: float,
+        pi2_0: float,
+        t_end: float,
+        dt: float
+    ) -> Dict[str, np.ndarray]:
+        """Use Verlet integrator from core suite for conservative dynamics."""
+        integrator = Verlet(self._hamiltonian)
+
+        q0 = np.array([mu1_0, mu2_0])
+        p0 = np.array([pi1_0, pi2_0])
+
+        t_arr, q_arr, p_arr, stats = integrator.integrate(
+            q0, p0,
+            t_span=(0.0, t_end),
+            dt=dt
+        )
+
+        total_momentum = p_arr[:, 0] + p_arr[:, 1]
+
+        return {
+            't': t_arr,
+            'mu1': q_arr[:, 0],
+            'mu2': q_arr[:, 1],
+            'pi1': p_arr[:, 0],
+            'pi2': p_arr[:, 1],
+            'total_momentum': total_momentum,
+            'momentum_diff': p_arr[:, 0] - p_arr[:, 1],
+            'integrator_stats': stats,
         }
 
 
