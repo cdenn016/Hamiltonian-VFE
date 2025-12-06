@@ -930,12 +930,17 @@ class TwoAgentSystem:
     """
     Two coupled agents with momentum transfer (Section 4.6).
 
-    **Built on TwoAgentHamiltonian from core dynamics suite.**
+    **NOW WITH PROPER GAUGE VFE SUPPORT!**
 
-    M₁μ̈₁ + γ₁μ̇₁ = -Λ̄₁(μ₁ - μ̄₁) - β₁₂Λ₂(μ₁ - μ₂)
-    M₂μ̈₂ + γ₂μ̇₂ = -Λ̄₂(μ₂ - μ̄₂) - β₂₁Λ₁(μ₂ - μ₁)
+    In VFE mode:
+    - Uses REAL Agent objects with mu_q, Sigma_q, mu_p, Sigma_p, gauge.phi
+    - Uses MultiAgentVFEHamiltonian with compute_total_free_energy()
+    - Gauge transport: Ω_ij = exp(φ_i) · exp(-φ_j)
 
-    The coupling terms show momentum transfer and recoil.
+    M₁μ̈₁ + γ₁μ̇₁ = -∇₁F[q₁, q₂, p₁, p₂, φ₁, φ₂]
+    M₂μ̈₂ + γ₂μ̇₂ = -∇₂F[q₁, q₂, p₁, p₂, φ₁, φ₂]
+
+    The coupling terms show momentum transfer and recoil WITH gauge transport!
     """
 
     def __init__(
@@ -948,6 +953,8 @@ class TwoAgentSystem:
         prior1: float = 0.0,
         prior2: float = 0.0,
         prior_strength: float = 0.1,  # Λ̄ (prior anchoring)
+        use_vfe: bool = False,  # NEW: Use actual gauge VFE theory!
+        K_latent: int = 3,      # Latent dimension for VFE mode
     ):
         self.M1 = precision1
         self.M2 = precision2
@@ -957,20 +964,52 @@ class TwoAgentSystem:
         self.mu_bar1 = prior1
         self.mu_bar2 = prior2
         self.Lambda_bar = prior_strength
+        self.use_vfe = use_vfe
+        self.K_latent = K_latent
 
-        # Build core suite Hamiltonian
-        self._hamiltonian = TwoAgentHamiltonian(
-            precision1=precision1,
-            precision2=precision2,
-            coupling=coupling,
-            prior1=prior1,
-            prior2=prior2,
-            prior_strength=prior_strength,
-        )
+        if use_vfe:
+            # =========================================================
+            # VFE MODE: Use ACTUAL gauge VFE with real Agent objects!
+            # =========================================================
+            # Create real agents
+            sigma1 = 1.0 / np.sqrt(precision1)  # Σ ∝ 1/Λ
+            sigma2 = 1.0 / np.sqrt(precision2)
+
+            mu_p1 = np.zeros(K_latent)
+            mu_p1[0] = prior1
+            mu_p2 = np.zeros(K_latent)
+            mu_p2[0] = prior2
+
+            self.agent1 = create_particle_agent(
+                agent_id=0, K=K_latent, mu_p_init=mu_p1,
+                sigma_scale=sigma1, seed=1
+            )
+            self.agent2 = create_particle_agent(
+                agent_id=1, K=K_latent, mu_p_init=mu_p2,
+                sigma_scale=sigma2, seed=2
+            )
+
+            # Create multi-agent system
+            self._multi_agent_system = MultiAgentSystem(
+                agents=[self.agent1, self.agent2]
+            )
+
+            # Build VFE Hamiltonian
+            self._hamiltonian = MultiAgentVFEHamiltonian(self._multi_agent_system)
+        else:
+            # Simple quadratic mode
+            self._hamiltonian = TwoAgentHamiltonian(
+                precision1=precision1,
+                precision2=precision2,
+                coupling=coupling,
+                prior1=prior1,
+                prior2=prior2,
+                prior_strength=prior_strength,
+            )
 
     @property
-    def hamiltonian(self) -> TwoAgentHamiltonian:
-        """Access underlying core suite Hamiltonian."""
+    def hamiltonian(self):
+        """Access underlying Hamiltonian."""
         return self._hamiltonian
 
     def equations_of_motion(self, t: float, y: np.ndarray) -> np.ndarray:
@@ -979,23 +1018,48 @@ class TwoAgentSystem:
 
         Uses core suite's equations_of_motion and adds damping.
 
-        y = [μ₁, μ₂, π₁, π₂]
+        Simple mode: y = [μ₁, μ₂, π₁, π₂]
+        VFE mode: y = [μ₁[0:K], μ₂[0:K], π₁[0:K], π₂[0:K]]
         """
-        mu1, mu2, pi1, pi2 = y
-        q = np.array([mu1, mu2])
-        p = np.array([pi1, pi2])
+        if self.use_vfe:
+            # VFE mode: K-dimensional states per agent
+            K = self.K_latent
+            mu1 = y[0:K]
+            mu2 = y[K:2*K]
+            pi1 = y[2*K:3*K]
+            pi2 = y[3*K:4*K]
 
-        # Get conservative dynamics from core Hamiltonian
-        dq_dt, dp_dt = self._hamiltonian.equations_of_motion(q, p)
+            q = np.concatenate([mu1, mu2])
+            p = np.concatenate([pi1, pi2])
 
-        # Velocities
-        v1, v2 = dq_dt[0], dq_dt[1]
+            # Get conservative dynamics from VFE Hamiltonian
+            dq_dt, dp_dt = self._hamiltonian.equations_of_motion(q, p)
 
-        # Add damping
-        dp1_dt = dp_dt[0] - self.gamma1 * v1
-        dp2_dt = dp_dt[1] - self.gamma2 * v2
+            v1 = dq_dt[0:K]
+            v2 = dq_dt[K:2*K]
 
-        return np.array([v1, v2, dp1_dt, dp2_dt])
+            # Add damping
+            dp1_dt = dp_dt[0:K] - self.gamma1 * v1
+            dp2_dt = dp_dt[K:2*K] - self.gamma2 * v2
+
+            return np.concatenate([v1, v2, dp1_dt, dp2_dt])
+        else:
+            # Simple mode: scalar states
+            mu1, mu2, pi1, pi2 = y
+            q = np.array([mu1, mu2])
+            p = np.array([pi1, pi2])
+
+            # Get conservative dynamics from core Hamiltonian
+            dq_dt, dp_dt = self._hamiltonian.equations_of_motion(q, p)
+
+            # Velocities
+            v1, v2 = dq_dt[0], dq_dt[1]
+
+            # Add damping
+            dp1_dt = dp_dt[0] - self.gamma1 * v1
+            dp2_dt = dp_dt[1] - self.gamma2 * v2
+
+            return np.array([v1, v2, dp1_dt, dp2_dt])
 
     def simulate(
         self,
@@ -1011,16 +1075,40 @@ class TwoAgentSystem:
         Simulate two-agent dynamics.
 
         Args:
+            mu1_0, mu2_0: Initial belief positions (scalar, will be expanded in VFE mode)
+            pi1_0, pi2_0: Initial momenta (scalar, will be expanded in VFE mode)
             use_symplectic: If True and no damping, use Verlet integrator
         """
+        if self.use_vfe:
+            # VFE mode: expand scalars to K-dimensional vectors
+            K = self.K_latent
+            mu1_vec = np.zeros(K)
+            mu1_vec[0] = mu1_0
+            mu2_vec = np.zeros(K)
+            mu2_vec[0] = mu2_0
+            pi1_vec = np.zeros(K)
+            pi1_vec[0] = pi1_0
+            pi2_vec = np.zeros(K)
+            pi2_vec[0] = pi2_0
+
+            # Set initial agent states
+            self.agent1.mu_q = mu1_vec.astype(np.float32)
+            self.agent2.mu_q = mu2_vec.astype(np.float32)
+
+            y0 = np.concatenate([mu1_vec, mu2_vec, pi1_vec, pi2_vec])
+        else:
+            y0 = np.array([mu1_0, mu2_0, pi1_0, pi2_0])
+
         # For conservative systems, use symplectic integrator
         if use_symplectic and self.gamma1 == 0 and self.gamma2 == 0:
-            return self._simulate_symplectic(mu1_0, mu2_0, pi1_0, pi2_0, t_end, dt)
+            if not self.use_vfe:
+                return self._simulate_symplectic(mu1_0, mu2_0, pi1_0, pi2_0, t_end, dt)
+            # VFE mode symplectic not implemented yet
+            pass
 
         # For dissipative systems, use scipy
         t_span = (0, t_end)
         t_eval = np.arange(0, t_end, dt)
-        y0 = np.array([mu1_0, mu2_0, pi1_0, pi2_0])
 
         sol = solve_ivp(
             self.equations_of_motion,
@@ -1031,17 +1119,30 @@ class TwoAgentSystem:
             max_step=dt
         )
 
-        # Compute total momentum (should show transfer)
-        total_momentum = sol.y[2] + sol.y[3]
+        if self.use_vfe:
+            # Extract first component for visualization
+            K = self.K_latent
+            mu1 = sol.y[0, :]  # First component of agent 1's belief
+            mu2 = sol.y[K, :]  # First component of agent 2's belief
+            pi1 = sol.y[2*K, :]  # First component of agent 1's momentum
+            pi2 = sol.y[3*K, :]  # First component of agent 2's momentum
+            total_momentum = pi1 + pi2
+        else:
+            mu1 = sol.y[0]
+            mu2 = sol.y[1]
+            pi1 = sol.y[2]
+            pi2 = sol.y[3]
+            total_momentum = pi1 + pi2
 
         return {
             't': sol.t,
-            'mu1': sol.y[0],
-            'mu2': sol.y[1],
-            'pi1': sol.y[2],
-            'pi2': sol.y[3],
+            'mu1': mu1,
+            'mu2': mu2,
+            'pi1': pi1,
+            'pi2': pi2,
             'total_momentum': total_momentum,
-            'momentum_diff': sol.y[2] - sol.y[3],
+            'momentum_diff': pi1 - pi2,
+            'use_vfe': self.use_vfe,
         }
 
     def _simulate_symplectic(
@@ -1088,8 +1189,10 @@ def simulate_damping_regimes(
     stiffness: float = 1.0,
     mu0: float = 1.0,
     pi0: float = 0.0,
-    t_end: float =50.0,
-    output_dir: Optional[Path] = None
+    t_end: float = 50.0,
+    output_dir: Optional[Path] = None,
+    use_vfe: bool = True,  # NEW: Use actual VFE theory!
+    K_latent: int = 3,     # Latent dimension for VFE mode
 ) -> Dict[str, Dict]:
     """
     Simulate three damping regimes for the same agent.
@@ -1099,13 +1202,22 @@ def simulate_damping_regimes(
     - Critical: Δ = 0 (γ = 2√(KM)) → Optimal
     - Underdamped: Δ < 0 (γ < 2√(KM)) → Oscillatory
 
+    **NOW WITH GAUGE VFE THEORY!**
+
+    In VFE mode:
+    - Mass M = Λ = Σ^{-1} (Fisher metric from agent's precision)
+    - Potential V = F[q, p, φ] (actual VFE functional!)
+    - Forces come from ∇F = ∇KL(q||p) + ...
+
     Args:
-        precision: Epistemic mass M = Λ
-        stiffness: Evidence strength K
+        precision: Epistemic mass M = Λ (controls sigma_scale in VFE mode)
+        stiffness: Evidence strength K (controls lambda_self in VFE mode)
         mu0: Initial belief displacement
         pi0: Initial momentum
         t_end: Simulation duration
         output_dir: Where to save figures
+        use_vfe: If True, use ACTUAL gauge VFE theory!
+        K_latent: Latent dimension for VFE mode
 
     Returns:
         Dictionary with simulation results for each regime
@@ -1128,27 +1240,69 @@ def simulate_damping_regimes(
 
     print("\n" + "="*70)
     print("SIMULATION 1: THREE DAMPING REGIMES")
+    if use_vfe:
+        print(">>> USING ACTUAL GAUGE VFE THEORY <<<")
     print("="*70)
     print(f"Precision (Mass) M = {precision}")
     print(f"Stiffness K = {stiffness}")
     print(f"Natural frequency ω₀ = √(K/M) = {np.sqrt(stiffness/precision):.3f}")
     print(f"Critical damping γ_c = 2√(KM) = {gamma_critical:.3f}")
+    if use_vfe:
+        print(f"Latent dimension K = {K_latent}")
     print()
 
     for regime_name, gamma in regimes.items():
-        osc = EpistemicOscillator(
-            precision=precision,
-            stiffness=stiffness,
-            damping=gamma,
-            equilibrium=0.0
-        )
+        if use_vfe:
+            # =====================================================
+            # VFE MODE: Use ACTUAL gauge variational free energy!
+            # =====================================================
+            # sigma_scale controls precision: Λ = Σ^{-1}
+            # Small sigma → high precision → high mass
+            sigma_scale = 1.0 / np.sqrt(precision)  # Σ ∝ 1/Λ
 
-        result = osc.simulate(mu0, pi0, t_end)
+            # Initial belief mean with displacement in first component
+            mu_q_init = np.zeros(K_latent)
+            mu_q_init[0] = mu0
+
+            # Prior at origin
+            mu_p_init = np.zeros(K_latent)
+
+            osc = EpistemicOscillator.create_vfe_oscillator(
+                K=K_latent,
+                mu_q_init=mu_q_init,
+                mu_p_init=mu_p_init,
+                sigma_scale=sigma_scale,
+                damping=gamma,
+                lambda_self=stiffness,
+                seed=42,
+            )
+        else:
+            # Simple quadratic mode (for comparison)
+            osc = EpistemicOscillator(
+                precision=precision,
+                stiffness=stiffness,
+                damping=gamma,
+                equilibrium=0.0
+            )
+
+        # For VFE mode, simulate in K-dimensional space
+        if use_vfe:
+            # Get initial momentum vector
+            pi0_vec = np.zeros(K_latent)
+            pi0_vec[0] = pi0
+            result = osc.simulate(osc.agent.mu_q.copy(), pi0_vec, t_end)
+            # Extract first component for visualization
+            result['mu'] = result['mu'][:, 0] if result['mu'].ndim > 1 else result['mu']
+            result['pi'] = result['pi'][:, 0] if result['pi'].ndim > 1 else result['pi']
+        else:
+            result = osc.simulate(mu0, pi0, t_end)
+
         result['regime'] = regime_name
         result['gamma'] = gamma
         result['damping_ratio'] = osc.damping_ratio
         result['decay_time'] = osc.decay_time
         result['oscillator'] = osc
+        result['use_vfe'] = use_vfe
         results[regime_name] = result
 
         print(f"{regime_name.upper()}:")
@@ -1157,6 +1311,8 @@ def simulate_damping_regimes(
         print(f"  Decay time τ = {osc.decay_time:.3f}")
         if regime_name == 'underdamped':
             print(f"  Damped frequency ω = {osc.damped_frequency:.3f}")
+        if use_vfe:
+            print(f"  Hamiltonian type: {type(osc.hamiltonian).__name__}")
         print()
 
     # Create visualization
@@ -1297,13 +1453,22 @@ def simulate_momentum_transfer(
     coupling: float = 0.5,
     initial_momentum1: float = 2.0,
     t_end: float = 50.0,
-    output_dir: Optional[Path] = None
+    output_dir: Optional[Path] = None,
+    use_vfe: bool = True,  # NEW: Use actual VFE theory!
+    K_latent: int = 3,     # Latent dimension for VFE mode
 ) -> Dict[str, np.ndarray]:
     """
     Simulate momentum transfer between two coupled agents.
 
+    **NOW WITH GAUGE VFE THEORY!**
+
+    In VFE mode:
+    - Uses REAL Agent objects with gauge fields φ
+    - Gauge transport Ω_ij = exp(φ_i) · exp(-φ_j)
+    - Full VFE: F = KL(q||p) + Σ_j β_ij KL(q_i||Ω_ij[q_j])
+
     Key prediction: The influencer's momentum decreases (recoil effect)
-    as momentum flows to the coupled partner.
+    as momentum flows to the coupled partner WITH gauge transport!
 
     From Eq. 48-52:
     - Momentum current: J_{k→i} = β_{ik} Λ̃_k (μ̃_k - μ_i)
@@ -1316,6 +1481,8 @@ def simulate_momentum_transfer(
         initial_momentum1: Initial momentum of agent 1
         t_end: Simulation duration
         output_dir: Where to save figures
+        use_vfe: If True, use ACTUAL gauge VFE theory!
+        K_latent: Latent dimension for VFE mode
     """
     if output_dir is None:
         output_dir = Path("_experiments/momentum_transfer")
@@ -1323,11 +1490,15 @@ def simulate_momentum_transfer(
 
     print("\n" + "="*70)
     print("SIMULATION 2: TWO-AGENT MOMENTUM TRANSFER")
+    if use_vfe:
+        print(">>> USING ACTUAL GAUGE VFE THEORY <<<")
     print("="*70)
     print(f"Agent 1: Precision = {precision1} (influencer, starts with momentum)")
     print(f"Agent 2: Precision = {precision2} (listener, starts at rest)")
     print(f"Coupling β = {coupling}")
     print(f"Initial momentum π₁(0) = {initial_momentum1}")
+    if use_vfe:
+        print(f"Latent dimension K = {K_latent}")
     print()
 
     system = TwoAgentSystem(
@@ -1338,8 +1509,13 @@ def simulate_momentum_transfer(
         damping2=0.05,
         prior1=0.0,
         prior2=0.0,
-        prior_strength=0.1
+        prior_strength=0.1,
+        use_vfe=use_vfe,
+        K_latent=K_latent,
     )
+
+    if use_vfe:
+        print(f"Hamiltonian type: {type(system.hamiltonian).__name__}")
 
     # Agent 1 starts moving, agent 2 at rest
     result = system.simulate(
@@ -1662,10 +1838,19 @@ def simulate_resonance(
     forcing_amplitude: float = 0.5,
     omega_range: np.ndarray = None,
     t_end: float = 100.0,
-    output_dir: Optional[Path] = None
+    output_dir: Optional[Path] = None,
+    use_vfe: bool = True,  # NEW: Use actual VFE theory!
+    K_latent: int = 3,     # Latent dimension for VFE mode
 ) -> Dict[str, np.ndarray]:
     """
     Simulate resonance curve for periodic evidence forcing.
+
+    **NOW WITH GAUGE VFE THEORY!**
+
+    In VFE mode:
+    - Uses ACTUAL VFE functional as potential
+    - Fisher metric Λ = Σ^{-1} as mass tensor
+    - Resonance occurs at ω_res = √(∂²F/∂μ² / M)
 
     From Eq. 40-42:
     - ω_res = √(K/M) = resonance frequency
@@ -1680,6 +1865,8 @@ def simulate_resonance(
         omega_range: Frequencies to test
         t_end: Simulation time (need steady state)
         output_dir: Where to save figures
+        use_vfe: If True, use ACTUAL gauge VFE theory!
+        K_latent: Latent dimension for VFE mode
     """
     if output_dir is None:
         output_dir = Path("_experiments/resonance")
@@ -1693,12 +1880,16 @@ def simulate_resonance(
 
     print("\n" + "="*70)
     print("SIMULATION 4: RESONANCE CURVE")
+    if use_vfe:
+        print(">>> USING ACTUAL GAUGE VFE THEORY <<<")
     print("="*70)
     print(f"Precision M = {precision}")
     print(f"Stiffness K = {stiffness}")
     print(f"Damping γ = {damping}")
     print(f"Natural frequency ω₀ = √(K/M) = {omega_0:.3f}")
     print(f"Forcing amplitude f₀ = {forcing_amplitude}")
+    if use_vfe:
+        print(f"Latent dimension K = {K_latent}")
     print()
 
     results = {
@@ -1707,15 +1898,31 @@ def simulate_resonance(
         'amplitude': [],
         'theoretical_amplitude': [],
         'phase': [],
-        'example_trajectories': {}
+        'example_trajectories': {},
+        'use_vfe': use_vfe,
     }
 
-    osc = EpistemicOscillator(
-        precision=precision,
-        stiffness=stiffness,
-        damping=damping,
-        equilibrium=0.0
-    )
+    if use_vfe:
+        # VFE mode: Create oscillator with actual VFE
+        sigma_scale = 1.0 / np.sqrt(precision)
+        osc = EpistemicOscillator.create_vfe_oscillator(
+            K=K_latent,
+            mu_q_init=np.zeros(K_latent),
+            mu_p_init=np.zeros(K_latent),
+            sigma_scale=sigma_scale,
+            damping=damping,
+            lambda_self=stiffness,
+            seed=42,
+        )
+        print(f"Hamiltonian type: {type(osc.hamiltonian).__name__}")
+    else:
+        # Simple quadratic mode
+        osc = EpistemicOscillator(
+            precision=precision,
+            stiffness=stiffness,
+            damping=damping,
+            equilibrium=0.0
+        )
 
     # Theoretical amplitude function (Eq. 41)
     def theoretical_amplitude(omega):
@@ -1727,16 +1934,25 @@ def simulate_resonance(
         # Periodic forcing
         forcing = lambda t, w=omega: forcing_amplitude * np.cos(w * t)
 
-        result = osc.simulate(
-            mu0=0.0,
-            pi0=0.0,
-            t_end=t_end,
-            forcing=forcing
-        )
+        if use_vfe:
+            # VFE mode: K-dimensional initial conditions
+            mu0_vec = np.zeros(K_latent)
+            pi0_vec = np.zeros(K_latent)
+            result = osc.simulate(mu0_vec, pi0_vec, t_end, forcing=forcing)
+            # Extract first component
+            mu_trace = result['mu'][:, 0] if result['mu'].ndim > 1 else result['mu']
+        else:
+            result = osc.simulate(
+                mu0=0.0,
+                pi0=0.0,
+                t_end=t_end,
+                forcing=forcing
+            )
+            mu_trace = result['mu']
 
         # Measure steady-state amplitude (last 20% of simulation)
         steady_start = int(0.8 * len(result['t']))
-        steady_state = result['mu'][steady_start:]
+        steady_state = mu_trace[steady_start:]
         amplitude = (np.max(steady_state) - np.min(steady_state)) / 2
 
         results['amplitude'].append(amplitude)
@@ -1746,7 +1962,9 @@ def simulate_resonance(
         for ratio in [0.5, 1.0, 2.0]:
             target = omega_0 * ratio
             if abs(omega - target) < (omega_range[1] - omega_range[0]) / 2:
-                results['example_trajectories'][omega] = result
+                result_copy = result.copy()
+                result_copy['mu'] = mu_trace  # Store extracted trace
+                results['example_trajectories'][omega] = result_copy
 
     results['amplitude'] = np.array(results['amplitude'])
     results['theoretical_amplitude'] = np.array(results['theoretical_amplitude'])
@@ -1762,6 +1980,8 @@ def simulate_resonance(
 
     print(f"Measured resonance: ω = {results['measured_omega_res']:.3f}, A = {results['measured_A_max']:.3f}")
     print(f"Theoretical: ω = {omega_0:.3f}, A_max = {A_max_theory:.3f}")
+    if use_vfe:
+        print(f"Using VFE Hamiltonian: {type(osc.hamiltonian).__name__}")
 
     _plot_resonance(results, output_dir, precision, stiffness, damping, forcing_amplitude)
 
