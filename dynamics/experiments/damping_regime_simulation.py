@@ -13,23 +13,26 @@ Damping Regimes and Epistemic Momentum Simulations
 Comprehensive simulations demonstrating the Hamiltonian dynamics of belief
 evolution from "The Inertia of Belief: Hiding in Plain Sight" manuscript.
 
-**Now utilizing the core dynamics suite** for proper Hamiltonian mechanics
-and symplectic integration.
+**Now utilizing the GAUGE VARIATIONAL FREE ENERGY theory** for proper
+Hamiltonian mechanics with:
+- Full VFE functional as potential: F[q, p, φ]
+- Fisher metric as mass tensor: M = Λ = Σ⁻¹
+- Gauge transport operators: Ω_ij = exp(φ_i) · exp(-φ_j)
+- Softmax attention weights: β_ij, γ_ij
+- χ-weighted spatial integration
 
 Simulations implemented:
 1. Three Damping Regimes - Overdamped, critically damped, underdamped
-2. Two-Agent Momentum Transfer - Recoil effect visualization
+2. Two-Agent Momentum Transfer - Recoil effect with gauge transport
 3. Confirmation Bias as Stopping Distance - d ∝ Λ relationship
 4. Resonance Curve - Peak at ω_res = √(K/M)
 5. Belief Perseverance Decay - τ ∝ Λ/γ relationship
 
 Key equations from manuscript:
-- Damped oscillator: M μ̈ + γ μ̇ + K μ = f(t)
-- Mass = Precision: M = Λ = Σ⁻¹
-- Natural frequency: ω₀ = √(K/M)
-- Damping regimes based on Δ = γ² - 4KM
-- Stopping distance: d_stop = M‖μ̇‖² / (2‖f‖)
-- Decay time: τ = M/γ
+- Hamiltonian: H = (1/2) π^T Λ^{-1} π + F[q, p, φ]
+- Damped oscillator: M μ̈ + γ μ̇ = -∇_μ F
+- Mass = Precision: M = Λ = Σ⁻¹ (Fisher metric)
+- VFE potential: F = KL(q||p) + Σ_j β_ij KL(q_i||Ω_ij[q_j]) + ...
 
 Author: Generated from psych_manuscript.pdf theory
 Date: November 2025
@@ -39,108 +42,303 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from pathlib import Path
-from typing import Tuple, Dict, List, Optional, Callable
-from dataclasses import dataclass
+from typing import Tuple, Dict, List, Optional, Callable, Union
+from dataclasses import dataclass, field
 from scipy.integrate import solve_ivp
 
 # Import from core dynamics suite
 from dynamics.hamiltonian import BeliefHamiltonian, HamiltonianState
 from dynamics.integrators import Verlet, PEFRL, SymplecticIntegrator
 
+# Import gauge VFE theory components
+from gradients.free_energy_clean import (
+    compute_self_energy,
+    compute_total_free_energy,
+    FreeEnergyBreakdown,
+    kl_gaussian
+)
+from gradients.gauge_fields import GaugeField
+from math_utils.numerical_utils import kl_gaussian as kl_gauss_util
+
 
 # =============================================================================
-# Core Dynamics Classes - Built on Core Suite
+# VFE-Connected Hamiltonian Classes
+# =============================================================================
+
+class VFEHamiltonian(BeliefHamiltonian):
+    """
+    Hamiltonian using the actual Gauge Variational Free Energy as potential.
+
+    H(μ, π) = T(π) + V(μ)
+
+    Where:
+    - T(π) = (1/2) π^T Λ^{-1} π  (kinetic, Fisher metric)
+    - V(μ) = F[q(μ), p, φ]       (potential = full VFE!)
+
+    The VFE includes:
+    - Self-coupling: α KL(q||p)
+    - Belief alignment: Σ_j β_ij KL(q_i||Ω_ij[q_j])
+    - Prior alignment: Σ_j γ_ij KL(p_i||Ω_ij[p_j])
+    - Observations: -E_q[log p(o|x)]
+
+    This connects the damping regime simulations to the REAL physics!
+    """
+
+    def __init__(
+        self,
+        agent,
+        system=None,
+        lambda_self: float = 1.0,
+        use_full_vfe: bool = True,
+    ):
+        """
+        Initialize VFE-based Hamiltonian.
+
+        Args:
+            agent: Agent object with beliefs q, priors p, gauge φ
+            system: Optional MultiAgentSystem for multi-agent VFE terms
+            lambda_self: Self-coupling strength
+            use_full_vfe: If True, use full VFE; if False, use just KL(q||p)
+        """
+        self.agent = agent
+        self.system = system
+        self.lambda_self = lambda_self
+        self.use_full_vfe = use_full_vfe
+
+        # Initialize parent with VFE-based potential and Fisher metric
+        super().__init__(
+            potential=self._vfe_potential,
+            metric=self._fisher_metric
+        )
+
+    def _vfe_potential(self, q: np.ndarray) -> float:
+        """
+        Compute VFE potential V(μ) = F[q(μ), p, φ].
+
+        The position q here represents the belief mean μ.
+        We update the agent's belief mean and compute VFE.
+        """
+        # Update agent belief mean (temporarily)
+        original_mu = self.agent.mu_q.copy()
+
+        # Handle different dimensionalities
+        if self.agent.geometry.is_particle:
+            self.agent.mu_q = q.astype(np.float32)
+        else:
+            # For spatial agents, q might be flattened
+            self.agent.mu_q = q.reshape(self.agent.mu_q.shape).astype(np.float32)
+
+        # Compute VFE
+        if self.use_full_vfe and self.system is not None:
+            # Full multi-agent VFE
+            breakdown = compute_total_free_energy(self.system)
+            vfe = breakdown.total
+        else:
+            # Single-agent self-energy: KL(q||p)
+            vfe = compute_self_energy(self.agent, lambda_self=self.lambda_self)
+
+        # Restore original belief
+        self.agent.mu_q = original_mu
+
+        return float(vfe)
+
+    def _fisher_metric(self, q: np.ndarray) -> np.ndarray:
+        """
+        Fisher information metric G = Λ = Σ^{-1}.
+
+        The Fisher metric for Gaussian beliefs is the precision matrix.
+        This provides the natural "mass" for belief dynamics.
+        """
+        if self.agent.geometry.is_particle:
+            # 0D agent: single precision matrix
+            Sigma = self.agent.Sigma_q
+        else:
+            # Spatial agent: average precision (simplified)
+            Sigma = np.mean(self.agent.Sigma_q, axis=tuple(range(self.agent.geometry.ndim)))
+
+        # Fisher metric = precision = inverse covariance
+        try:
+            Lambda = np.linalg.inv(Sigma)
+        except np.linalg.LinAlgError:
+            Lambda = np.linalg.inv(Sigma + 1e-6 * np.eye(Sigma.shape[0]))
+
+        return Lambda
+
+
+# =============================================================================
+# Core Dynamics Classes - Built on Core Suite + VFE Theory
 # =============================================================================
 
 @dataclass
 class BeliefState:
     """State of a single agent's belief (wraps HamiltonianState)."""
-    mu: float           # Belief mean (position)
-    pi: float           # Belief momentum
-    precision: float    # Λ = 1/σ² (acts as mass)
+    mu: Union[float, np.ndarray]  # Belief mean (position)
+    pi: Union[float, np.ndarray]  # Belief momentum
+    precision: Union[float, np.ndarray]  # Λ = 1/σ² (acts as mass)
     t: float = 0.0
 
     @property
-    def mass(self) -> float:
+    def mass(self) -> Union[float, np.ndarray]:
         return self.precision
 
     @property
-    def velocity(self) -> float:
+    def velocity(self) -> Union[float, np.ndarray]:
         return self.pi / self.mass
 
     def to_hamiltonian_state(self) -> HamiltonianState:
         """Convert to core suite HamiltonianState."""
+        mu_arr = np.atleast_1d(self.mu)
+        pi_arr = np.atleast_1d(self.pi)
         return HamiltonianState(
-            q=np.array([self.mu]),
-            p=np.array([self.pi]),
+            q=mu_arr,
+            p=pi_arr,
             t=self.t
         )
 
 
 @dataclass
 class TwoAgentState:
-    """State of two coupled agents."""
-    mu1: float
-    mu2: float
-    pi1: float
-    pi2: float
-    precision1: float
-    precision2: float
+    """State of two coupled agents with gauge transport."""
+    mu1: Union[float, np.ndarray]
+    mu2: Union[float, np.ndarray]
+    pi1: Union[float, np.ndarray]
+    pi2: Union[float, np.ndarray]
+    precision1: Union[float, np.ndarray]
+    precision2: Union[float, np.ndarray]
     coupling: float     # β₁₂ = β₂₁ attention coupling
+    phi1: np.ndarray = field(default_factory=lambda: np.zeros(3))  # Gauge field agent 1
+    phi2: np.ndarray = field(default_factory=lambda: np.zeros(3))  # Gauge field agent 2
     t: float = 0.0
 
     def to_hamiltonian_state(self) -> HamiltonianState:
         """Convert to core suite HamiltonianState for 2-agent system."""
+        mu1_arr = np.atleast_1d(self.mu1)
+        mu2_arr = np.atleast_1d(self.mu2)
+        pi1_arr = np.atleast_1d(self.pi1)
+        pi2_arr = np.atleast_1d(self.pi2)
         return HamiltonianState(
-            q=np.array([self.mu1, self.mu2]),
-            p=np.array([self.pi1, self.pi2]),
+            q=np.concatenate([mu1_arr, mu2_arr]),
+            p=np.concatenate([pi1_arr, pi2_arr]),
             t=self.t
         )
+
+    @property
+    def transport_operator(self) -> np.ndarray:
+        """
+        Gauge transport operator Ω₁₂ = exp(φ₁) · exp(-φ₂).
+
+        This is the KEY connection to gauge theory!
+        """
+        from scipy.spatial.transform import Rotation
+        R1 = Rotation.from_rotvec(self.phi1).as_matrix()
+        R2 = Rotation.from_rotvec(self.phi2).as_matrix()
+        return R1 @ R2.T
 
 
 class EpistemicOscillator:
     """
     Damped epistemic oscillator from Eq. 36-37 of manuscript.
 
-    **Built on BeliefHamiltonian from core dynamics suite.**
+    **Now with TWO modes:**
+    1. Simple mode: Harmonic potential V = (1/2)K(μ - μ*)²
+    2. VFE mode: Full gauge variational free energy V = F[q, p, φ]
 
-    M μ̈ + γ μ̇ + K(μ - μ*) = f(t)
+    M μ̈ + γ μ̇ = -∇V + f(t)
 
     Where:
-    - M = precision (epistemic mass)
-    - γ = damping coefficient
-    - K = evidence strength (spring constant)
-    - μ* = equilibrium (prior or evidence target)
+    - M = precision = Λ = Σ⁻¹ (Fisher metric / epistemic mass)
+    - γ = damping coefficient (evidence integration rate)
+    - V = potential (harmonic or full VFE)
     - f(t) = external forcing (evidence stream)
+
+    The VFE mode uses the actual gauge variational free energy:
+        F = KL(q||p) + alignment terms + observation terms
     """
 
     def __init__(
         self,
-        precision: float,      # M = Λ
-        stiffness: float,      # K (evidence strength)
+        precision: float,      # M = Λ (scalar or from agent)
+        stiffness: float,      # K (evidence strength, for harmonic mode)
         damping: float,        # γ
-        equilibrium: float = 0.0,  # μ* (target)
+        equilibrium: float = 0.0,  # μ* (target, for harmonic mode)
+        agent=None,            # Optional: Agent for VFE mode
+        use_vfe: bool = False, # If True and agent provided, use VFE potential
     ):
         self.M = precision
         self.K = stiffness
         self.gamma = damping
         self.mu_eq = equilibrium
+        self.agent = agent
+        self.use_vfe = use_vfe and agent is not None
 
         # Build core suite Hamiltonian
         self._hamiltonian = self._create_hamiltonian()
 
     def _create_hamiltonian(self) -> BeliefHamiltonian:
         """Create BeliefHamiltonian from core dynamics suite."""
-        # Harmonic potential: V(μ) = (1/2) K (μ - μ*)²
-        def potential(q: np.ndarray) -> float:
-            mu = q[0] if len(q.shape) > 0 else q
-            return 0.5 * self.K * (mu - self.mu_eq)**2
+        if self.use_vfe:
+            # VFE mode: use actual free energy as potential
+            return VFEHamiltonian(
+                agent=self.agent,
+                system=None,  # Single agent
+                lambda_self=self.K,  # Use stiffness as self-coupling
+                use_full_vfe=False,  # Just KL(q||p) for single agent
+            )
+        else:
+            # Harmonic mode: simple quadratic potential
+            def potential(q: np.ndarray) -> float:
+                mu = q[0] if len(q.shape) > 0 else q
+                return 0.5 * self.K * (mu - self.mu_eq)**2
 
-        # Metric: G = M (scalar mass as 1x1 matrix)
-        def metric(q: np.ndarray) -> np.ndarray:
-            return np.array([[self.M]])
+            # Metric: G = M (scalar mass as 1x1 matrix)
+            def metric(q: np.ndarray) -> np.ndarray:
+                return np.array([[self.M]])
 
-        return BeliefHamiltonian(potential=potential, metric=metric)
+            return BeliefHamiltonian(potential=potential, metric=metric)
+
+    @classmethod
+    def from_agent(
+        cls,
+        agent,
+        damping: float,
+        stiffness: float = 1.0,
+    ) -> 'EpistemicOscillator':
+        """
+        Create oscillator from Agent using VFE theory.
+
+        This is the PROPER way to connect to gauge VFE:
+        - Mass = Fisher metric = precision = Σ⁻¹
+        - Potential = VFE = KL(q||p)
+
+        Args:
+            agent: Agent with beliefs, priors, gauge field
+            damping: Damping coefficient γ
+            stiffness: Self-coupling strength λ_self
+
+        Returns:
+            EpistemicOscillator configured for VFE dynamics
+        """
+        # Get precision from agent's belief covariance
+        if agent.geometry.is_particle:
+            Sigma = agent.Sigma_q
+        else:
+            Sigma = np.mean(agent.Sigma_q, axis=tuple(range(agent.geometry.ndim)))
+
+        # Precision = inverse covariance (scalar for 1D, trace for multi-D)
+        try:
+            Lambda = np.linalg.inv(Sigma)
+            precision = np.trace(Lambda) / Lambda.shape[0]  # Average precision
+        except np.linalg.LinAlgError:
+            precision = 1.0 / np.trace(Sigma) * Sigma.shape[0]
+
+        return cls(
+            precision=precision,
+            stiffness=stiffness,
+            damping=damping,
+            equilibrium=0.0,  # VFE mode doesn't use this
+            agent=agent,
+            use_vfe=True,
+        )
 
     @property
     def hamiltonian(self) -> BeliefHamiltonian:
@@ -303,14 +501,23 @@ class EpistemicOscillator:
 
 class TwoAgentHamiltonian(BeliefHamiltonian):
     """
-    Hamiltonian for two coupled agents, extending core suite.
+    Hamiltonian for two coupled agents with GAUGE TRANSPORT.
 
-    H = T₁ + T₂ + V_prior₁ + V_prior₂ + V_coupling
+    **Now with TWO modes:**
+    1. Simple mode: Quadratic coupling V = (β/2)(μ₁ - μ₂)²
+    2. VFE mode: Full gauge variational free energy with transport
+
+    H = T₁ + T₂ + V[q₁, q₂, φ₁, φ₂]
 
     Where:
-    - T_i = π_i²/(2M_i) kinetic energy
-    - V_prior_i = (Λ̄/2)(μ_i - μ̄_i)² prior anchoring
-    - V_coupling = (β/2)[M₂(μ₁ - μ₂)² + M₁(μ₂ - μ₁)²] consensus
+    - T_i = (1/2) π_i^T Λ_i^{-1} π_i  (kinetic, Fisher metric)
+    - V = F[q₁, q₂, p₁, p₂, φ₁, φ₂]   (VFE potential!)
+
+    VFE includes gauge transport:
+    - KL(q₁||p₁) + KL(q₂||p₂)                    [self-coupling]
+    - β₁₂ KL(q₁||Ω₁₂[q₂]) + β₂₁ KL(q₂||Ω₂₁[q₁]) [belief alignment with transport!]
+
+    The transport operator Ω₁₂ = exp(φ₁)·exp(-φ₂) is the KEY gauge theory element.
     """
 
     def __init__(
@@ -321,6 +528,9 @@ class TwoAgentHamiltonian(BeliefHamiltonian):
         prior1: float = 0.0,
         prior2: float = 0.0,
         prior_strength: float = 0.1,
+        phi1: np.ndarray = None,  # Gauge field agent 1
+        phi2: np.ndarray = None,  # Gauge field agent 2
+        use_gauge_transport: bool = False,  # Enable gauge VFE mode
     ):
         self.M1 = precision1
         self.M2 = precision2
@@ -328,6 +538,9 @@ class TwoAgentHamiltonian(BeliefHamiltonian):
         self.mu_bar1 = prior1
         self.mu_bar2 = prior2
         self.Lambda_bar = prior_strength
+        self.phi1 = phi1 if phi1 is not None else np.zeros(3)
+        self.phi2 = phi2 if phi2 is not None else np.zeros(3)
+        self.use_gauge_transport = use_gauge_transport
 
         # Initialize parent with our potential and metric
         super().__init__(
@@ -336,21 +549,156 @@ class TwoAgentHamiltonian(BeliefHamiltonian):
         )
 
     def _potential(self, q: np.ndarray) -> float:
-        """Total potential energy."""
+        """
+        Total potential energy.
+
+        In VFE mode: F = KL(q₁||p₁) + KL(q₂||p₂) + β KL(q₁||Ω[q₂])
+        In simple mode: V = prior anchoring + quadratic coupling
+        """
         mu1, mu2 = q[0], q[1]
 
-        # Prior anchoring
-        V_prior1 = 0.5 * self.Lambda_bar * (mu1 - self.mu_bar1)**2
-        V_prior2 = 0.5 * self.Lambda_bar * (mu2 - self.mu_bar2)**2
+        if self.use_gauge_transport:
+            # VFE mode with gauge transport
+            return self._vfe_potential_with_transport(mu1, mu2)
+        else:
+            # Simple quadratic mode
+            # Prior anchoring: KL(q||p) ≈ (Λ̄/2)(μ - μ̄)² for Gaussian
+            V_prior1 = 0.5 * self.Lambda_bar * (mu1 - self.mu_bar1)**2
+            V_prior2 = 0.5 * self.Lambda_bar * (mu2 - self.mu_bar2)**2
 
-        # Consensus coupling
-        V_coupling = 0.5 * self.beta * (self.M1 + self.M2) * (mu1 - mu2)**2
+            # Consensus coupling: β KL(q₁||q₂) ≈ (β/2)(Λ₁+Λ₂)(μ₁ - μ₂)²
+            V_coupling = 0.5 * self.beta * (self.M1 + self.M2) * (mu1 - mu2)**2
 
-        return V_prior1 + V_prior2 + V_coupling
+            return V_prior1 + V_prior2 + V_coupling
+
+    def _vfe_potential_with_transport(self, mu1: float, mu2: float) -> float:
+        """
+        Compute VFE with gauge transport operators.
+
+        F = α[KL(q₁||p₁) + KL(q₂||p₂)]
+          + β[KL(q₁||Ω₁₂[q₂]) + KL(q₂||Ω₂₁[q₁])]
+
+        Where Ω₁₂ = exp(φ₁)·exp(-φ₂) is the gauge transport.
+
+        For scalar beliefs, transport acts as rotation in latent space.
+        """
+        # Self-coupling: KL(q||p) for each agent
+        # For 1D Gaussian with precision Λ:
+        # KL(N(μ,σ²)||N(μ̄,σ̄²)) = (1/2)[log(σ̄²/σ²) + (σ² + (μ-μ̄)²)/σ̄² - 1]
+
+        sigma1_sq = 1.0 / self.M1
+        sigma2_sq = 1.0 / self.M2
+        sigma_bar1_sq = 1.0 / self.Lambda_bar if self.Lambda_bar > 0 else 1.0
+        sigma_bar2_sq = sigma_bar1_sq
+
+        # Self-coupling KL terms
+        kl_self1 = 0.5 * (
+            np.log(sigma_bar1_sq / sigma1_sq) +
+            (sigma1_sq + (mu1 - self.mu_bar1)**2) / sigma_bar1_sq - 1
+        )
+        kl_self2 = 0.5 * (
+            np.log(sigma_bar2_sq / sigma2_sq) +
+            (sigma2_sq + (mu2 - self.mu_bar2)**2) / sigma_bar2_sq - 1
+        )
+
+        # Gauge transport effect on coupling
+        # Transport operator Ω₁₂ = exp(φ₁)·exp(-φ₂)
+        # For scalar beliefs, this rotates the "reference frame"
+        # The transported belief mean is: μ₂' = Ω₁₂ · μ₂
+
+        from scipy.spatial.transform import Rotation
+        R12 = Rotation.from_rotvec(self.phi1).as_matrix() @ \
+              Rotation.from_rotvec(-self.phi2).as_matrix()
+
+        # For 1D embedded in 3D, transport effect:
+        # Use first component of rotation matrix as scaling
+        transport_factor = R12[0, 0]  # Projection onto first axis
+
+        # Transported mean: μ₂ → μ₂ · transport_factor
+        mu2_transported = mu2 * transport_factor
+
+        # Belief alignment KL with transport
+        # KL(q₁||Ω[q₂]) where q₂ has been transported
+        kl_align12 = 0.5 * (
+            np.log(sigma2_sq / sigma1_sq) +
+            (sigma1_sq + (mu1 - mu2_transported)**2) / sigma2_sq - 1
+        )
+
+        # Reverse transport for Ω₂₁
+        mu1_transported = mu1 * (1.0 / transport_factor if abs(transport_factor) > 1e-6 else 1.0)
+        kl_align21 = 0.5 * (
+            np.log(sigma1_sq / sigma2_sq) +
+            (sigma2_sq + (mu2 - mu1_transported)**2) / sigma1_sq - 1
+        )
+
+        # Total VFE
+        alpha = self.Lambda_bar  # Self-coupling strength
+        F = alpha * (kl_self1 + kl_self2) + self.beta * (kl_align12 + kl_align21)
+
+        return max(0.0, F)  # VFE is non-negative
 
     def _metric(self, q: np.ndarray) -> np.ndarray:
-        """Mass matrix (diagonal: [M1, M2])."""
+        """Mass matrix (diagonal: [M1, M2]) = Fisher metric."""
         return np.diag([self.M1, self.M2])
+
+    @classmethod
+    def from_agents(
+        cls,
+        agent1,
+        agent2,
+        coupling: float,
+        prior_strength: float = 0.1,
+    ) -> 'TwoAgentHamiltonian':
+        """
+        Create Hamiltonian from two Agent objects.
+
+        This is the PROPER way to connect to gauge VFE theory!
+
+        Args:
+            agent1, agent2: Agent objects with beliefs, priors, gauge fields
+            coupling: Attention coupling strength β
+            prior_strength: Prior anchoring strength Λ̄
+
+        Returns:
+            TwoAgentHamiltonian configured for gauge VFE dynamics
+        """
+        # Extract precisions from agents
+        def get_precision(agent):
+            if agent.geometry.is_particle:
+                Sigma = agent.Sigma_q
+            else:
+                Sigma = np.mean(agent.Sigma_q, axis=tuple(range(agent.geometry.ndim)))
+            try:
+                Lambda = np.linalg.inv(Sigma)
+                return np.trace(Lambda) / Lambda.shape[0]
+            except np.linalg.LinAlgError:
+                return 1.0 / np.trace(Sigma) * Sigma.shape[0]
+
+        # Extract prior means
+        def get_prior_mean(agent):
+            if agent.geometry.is_particle:
+                return float(np.mean(agent.mu_p))
+            else:
+                return float(np.mean(agent.mu_p))
+
+        # Extract gauge fields
+        def get_gauge(agent):
+            if agent.geometry.is_particle:
+                return agent.gauge.phi
+            else:
+                return np.mean(agent.gauge.phi, axis=tuple(range(agent.geometry.ndim)))
+
+        return cls(
+            precision1=get_precision(agent1),
+            precision2=get_precision(agent2),
+            coupling=coupling,
+            prior1=get_prior_mean(agent1),
+            prior2=get_prior_mean(agent2),
+            prior_strength=prior_strength,
+            phi1=get_gauge(agent1),
+            phi2=get_gauge(agent2),
+            use_gauge_transport=True,
+        )
 
 
 class TwoAgentSystem:
