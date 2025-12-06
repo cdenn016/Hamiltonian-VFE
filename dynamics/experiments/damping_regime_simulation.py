@@ -166,10 +166,12 @@ class VFEHamiltonian(BeliefHamiltonian):
         # Cache for gradient computation
         self._grad_eps = 1e-5
 
-        # Initialize parent with VFE-based potential and Fisher metric
+        # Initialize parent with VFE-based potential, Fisher metric, and analytical gradient
+        # Pass analytical gradient to parent for stable integration
         super().__init__(
             potential=self._vfe_potential,
-            metric=self._fisher_metric
+            metric=self._fisher_metric,
+            potential_gradient=self._analytical_gradient if (use_analytical_gradient and system is None) else None,
         )
 
     def _vfe_potential(self, q: np.ndarray) -> float:
@@ -227,45 +229,10 @@ class VFEHamiltonian(BeliefHamiltonian):
 
         return grad
 
-    def equations_of_motion(
-        self,
-        q: np.ndarray,
-        p: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Hamilton's equations with ANALYTICAL gradients for stability.
-
-        dq/dt = G^{-1} p
-        dp/dt = -∇V(q)
-        """
-        # Get metric (Fisher = precision)
-        G = self.metric(q)
-        try:
-            G_inv = np.linalg.inv(G)
-        except np.linalg.LinAlgError:
-            G_inv = np.linalg.inv(G + 1e-6 * np.eye(len(G)))
-
-        # dq/dt = G^{-1} p
-        dq_dt = G_inv @ p
-
-        # dp/dt = -∇V
-        if self.use_analytical_gradient and self.system is None:
-            # Use analytical gradient (stable!)
-            grad_V = self._analytical_gradient(q)
-        else:
-            # Fall back to numerical gradient for multi-agent systems
-            eps = self._grad_eps
-            grad_V = np.zeros_like(q)
-            for i in range(len(q)):
-                q_plus = q.copy()
-                q_plus[i] += eps
-                q_minus = q.copy()
-                q_minus[i] -= eps
-                grad_V[i] = (self.potential(q_plus) - self.potential(q_minus)) / (2 * eps)
-
-        dp_dt = -grad_V
-
-        return dq_dt, dp_dt
+    # NOTE: equations_of_motion is now handled by parent BeliefHamiltonian
+    # which uses the potential_gradient callback we passed in __init__.
+    # The Fisher metric Σ^{-1} is constant (doesn't depend on q), so
+    # no kinetic correction term is needed.
 
     def _fisher_metric(self, q: np.ndarray) -> np.ndarray:
         """

@@ -85,7 +85,8 @@ class BeliefHamiltonian:
         self,
         potential: Callable,  # V(θ) → float
         metric: Callable,     # G(θ) → (d, d) Fisher metric
-        metric_gradient: Optional[Callable] = None  # ∂G/∂θ (for kinetic correction)
+        metric_gradient: Optional[Callable] = None,  # ∂G/∂θ (for kinetic correction)
+        potential_gradient: Optional[Callable] = None,  # ∇V(θ) (for stable integration)
     ):
         """
         Initialize Hamiltonian.
@@ -94,10 +95,14 @@ class BeliefHamiltonian:
             potential: V(θ) returns potential energy (free energy)
             metric: G(θ) returns Fisher metric tensor
             metric_gradient: ∂G/∂θ for kinetic term correction (optional)
+            potential_gradient: ∇V(θ) analytical gradient (optional, RECOMMENDED!)
+                               If not provided, uses numerical finite differences.
+                               Analytical gradients are much more stable!
         """
         self.potential = potential
         self.metric = metric
         self.metric_gradient = metric_gradient
+        self.potential_gradient = potential_gradient
 
     def kinetic_energy(self, q: np.ndarray, p: np.ndarray) -> float:
         """
@@ -170,14 +175,19 @@ class BeliefHamiltonian:
         # Need: -∇V - (1/2) p^T ∂(G^{-1})/∂θ p
 
         # Potential gradient (force)
-        eps = 1e-5
-        grad_V = np.zeros_like(q)
-        for i in range(len(q)):
-            q_plus = q.copy()
-            q_plus[i] += eps
-            q_minus = q.copy()
-            q_minus[i] -= eps
-            grad_V[i] = (self.potential(q_plus) - self.potential(q_minus)) / (2 * eps)
+        if self.potential_gradient is not None:
+            # Use analytical gradient (MUCH more stable!)
+            grad_V = self.potential_gradient(q)
+        else:
+            # Fall back to numerical gradient (can be unstable)
+            eps = 1e-5
+            grad_V = np.zeros_like(q)
+            for i in range(len(q)):
+                q_plus = q.copy()
+                q_plus[i] += eps
+                q_minus = q.copy()
+                q_minus[i] -= eps
+                grad_V[i] = (self.potential(q_plus) - self.potential(q_minus)) / (2 * eps)
 
         # Kinetic gradient correction (from metric dependence on q)
         kinetic_correction = np.zeros_like(q)
@@ -188,12 +198,13 @@ class BeliefHamiltonian:
                 dG_inv_dq_i = -G_inv @ dG_dq[i] @ G_inv  # Matrix derivative chain rule
                 kinetic_correction[i] = 0.5 * p @ dG_inv_dq_i @ p
         else:
-            # Finite difference approximation
+            # Finite difference approximation for metric gradient
+            eps_metric = 1e-5
             for i in range(len(q)):
                 q_plus = q.copy()
-                q_plus[i] += eps
+                q_plus[i] += eps_metric
                 q_minus = q.copy()
-                q_minus[i] -= eps
+                q_minus[i] -= eps_metric
 
                 G_plus = self.metric(q_plus)
                 G_minus = self.metric(q_minus)
@@ -204,7 +215,7 @@ class BeliefHamiltonian:
                 except np.linalg.LinAlgError:
                     continue
 
-                dG_inv_dq_i = (G_inv_plus - G_inv_minus) / (2 * eps)
+                dG_inv_dq_i = (G_inv_plus - G_inv_minus) / (2 * eps_metric)
                 kinetic_correction[i] = 0.5 * p @ dG_inv_dq_i @ p
 
         dp_dt = -grad_V - kinetic_correction
