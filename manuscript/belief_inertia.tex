@@ -701,41 +701,46 @@ This result re-frames confirmation bias as a mechanical phenomenon rather than c
 
 \subsection{Resonance Under Periodic Evidence}
 
-The oscillator framework further predicts that periodic evidence can drive a resonant amplification of belief oscillations. We simulated this by subjecting an agent ($\Lambda = 2$, $K = 1$, $\gamma = 0.3$) to sinusoidal forcing $f(t) = f_0 \cos(\omega t)$ with amplitude $f_0 = 0.5$ across a range of driving frequencies.
+The oscillator framework further predicts that periodic evidence can drive a resonant amplification of belief oscillations. For $K$-dimensional belief states governed by the full variational free energy, the dynamics become a coupled system where mass and stiffness are matrices rather than scalars. The mass matrix $\mathbf{M} = \boldsymbol{\Lambda}_q = \boldsymbol{\Sigma}_q^{-1}$ derives from the Fisher information metric, while the stiffness matrix $\mathbf{K} = \lambda_{\text{self}} \boldsymbol{\Lambda}_p$ emerges from the VFE gradient. The natural frequencies are then eigenvalues of the generalized eigenvalue problem:
+\begin{equation}
+    \omega_i^2 = \text{eig}(\mathbf{M}^{-1}\mathbf{K}) = \text{eig}(\boldsymbol{\Sigma}_q \cdot \lambda_{\text{self}} \boldsymbol{\Lambda}_p)
+\end{equation}
+
+We simulated resonance by subjecting an agent with $K=3$ latent dimensions ($\gamma = 0.3$, $\lambda_{\text{self}} = 1$, covariance scale $\sigma = 1/\sqrt{2}$) to sinusoidal forcing $f(t) = f_0 \cos(\omega t)$ with amplitude $f_0 = 0.5$ across a range of driving frequencies.
 
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=1\linewidth]{resonance_curve.png}
-    \caption{\textbf{Cognitive resonance under periodic evidence.} 
-    Steady-state amplitude response of the damped belief oscillator to sinusoidal forcing 
-    $f(t) = f_0 \cos(\omega t)$ across driving frequencies $\omega$. 
-    Parameters: $\Lambda = 2$, $K = 1$, $\gamma = 0.3$, $f_0 = 0.5$. 
-    \textbf{Top:} Resonance curve showing amplitude $A(\omega)$ peaking at the natural 
-    frequency $\omega_0 = \sqrt{K/\Lambda}$. 
-    Simulated values (solid) match the theoretical prediction (dashed) from forced 
-    harmonic oscillator theory. 
-    \textbf{Bottom left:} Example steady-state oscillations at frequencies below, at, 
-    and above resonance. 
-    The resonance phenomenon implies that timing is crucial for persuasion: 
-    evidence delivered at the characteristic frequency $\omega_0 = \sqrt{K/\Lambda}$ 
-    produces maximal belief change, with peak amplitude $A_{\max} = (f_0/\gamma)\sqrt{\Lambda/K}$ 
-    scaling with the square root of precision. 
-    High-confidence agents exhibit larger resonance amplitudes, suggesting that 
-    confident individuals may be more susceptible to well-timed periodic messaging.}
+    \caption{\textbf{Cognitive resonance under periodic evidence.}
+    Steady-state amplitude response of the damped belief oscillator to sinusoidal forcing
+    $f(t) = f_0 \cos(\omega t)$ across driving frequencies $\omega$.
+    Parameters: $K=3$ latent dimensions, $\gamma = 0.3$, $\lambda_{\text{self}} = 1$, $f_0 = 0.5$.
+    \textbf{Top:} Resonance curve showing amplitude $A(\omega)$ peaking at the dominant
+    natural frequency $\omega_0 = \sqrt{\lambda_{\min}(\mathbf{M}^{-1}\mathbf{K})} \approx 0.385$.
+    Simulated values (solid) match the theoretical prediction (dashed) from forced
+    harmonic oscillator theory using effective mass $M_{\text{eff}} = \mathbf{v}^\top \mathbf{M} \mathbf{v}$
+    where $\mathbf{v}$ is the dominant mode eigenvector.
+    \textbf{Bottom left:} Example steady-state oscillations at frequencies below, at,
+    and above resonance.
+    The resonance phenomenon implies that timing is crucial for persuasion:
+    evidence delivered at the characteristic frequency produces maximal belief change.
+    The multi-dimensional structure means agents exhibit multiple resonance frequencies,
+    with the dominant mode determining primary susceptibility to periodic messaging.}
     \label{fig:resonance}
 \end{figure}
 
 
-Figure~\ref{fig:resonance} shows the steady-state amplitude $A(\omega)$ as a function of the driving frequency. The response exhibits a clear resonance peak at $\omega_{\text{res}} \approx 0.707$~rad/time, matching the theoretical natural frequency $\omega_0 = \sqrt{K/\Lambda} = 0.707$ to within $0.1\%$. The resonance curve shape matches the theoretical amplitude function as a Lorentzian profile with no free parameters, 
+Figure~\ref{fig:resonance} shows the steady-state amplitude $A(\omega)$ as a function of the driving frequency. The response exhibits a clear resonance peak at $\omega_{\text{res}} \approx 0.385$~rad/time, matching the theoretical dominant natural frequency computed from the minimum eigenvalue of $\mathbf{M}^{-1}\mathbf{K}$. Note that the naive scalar formula $\omega_0 = \sqrt{K/\Lambda}$ would predict $0.707$~rad/time---the discrepancy arises because the belief covariances $\boldsymbol{\Sigma}_q$ and $\boldsymbol{\Sigma}_p$ have different eigenvalue structures, and the coupled dynamics select the lowest-frequency mode.
 
+The resonance curve shape matches the theoretical amplitude function with effective parameters derived from projection onto the dominant mode:
 \begin{equation}
-    A(\omega) = \frac{f_0/\Lambda}{\sqrt{(\omega_0^2 - \omega^2)^2 + (\gamma\omega/\Lambda)^2}}
+    A(\omega) = \frac{f_0/M_{\text{eff}}}{\sqrt{(\omega_0^2 - \omega^2)^2 + (\gamma\omega/M_{\text{eff}})^2}}
 \end{equation}
+where $M_{\text{eff}} = \mathbf{v}^\top \mathbf{M} \mathbf{v}$ is the effective mass obtained by projecting the mass matrix onto the dominant mode eigenvector $\mathbf{v}$. This effective mass determines both the amplitude scaling and the quality factor $Q = \omega_0 M_{\text{eff}}/\gamma$ controlling resonance sharpness.
 
+At frequencies well below resonance, the response is quasi-static. Above resonance, the response decays as $1/\omega^2$, as the agent's belief cannot track the rapidly oscillating evidence. The multi-dimensional VFE structure introduces additional resonance peaks at higher frequencies corresponding to subdominant modes, though these are typically weaker.
 
-The measured peak amplitude $A_{\text{max}} \approx 2.36$ agrees with the theoretical prediction \\ $(f_0/\gamma)\sqrt{\Lambda/K} = 2.36$. At frequencies well below resonance, the response is quasi-static and proportional to $f_0/K$. Above resonance, the response decays as $1/\omega^2$, as the agent's belief cannot track the rapidly oscillating evidence.
-
-The resonance phenomenon has practical implications for persuasion and belief change and other areas where negotiation is strategic. Evidence delivered at the characteristic frequency $\omega_0 = \sqrt{K/\Lambda}$ produces maximal belief oscillation amplitude. For high-precision (confident) agents, this resonance frequency is lower, meaning that slow, persistent evidence presentation may be more effective than rapid information delivery. Conversely, the large resonance amplitude for high-$\Lambda$ agents suggests that confident individuals may be particularly susceptible to well-timed driven, periodic messaging.
+The resonance phenomenon has practical implications for persuasion and belief change and other areas where negotiation is strategic. Evidence delivered at the characteristic frequency produces maximal belief oscillation amplitude. The eigenvalue structure of the belief covariances determines which frequency is most effective---this depends on the geometry of the agent's uncertainty, not just its magnitude. Agents with anisotropic uncertainty (different confidence in different belief dimensions) exhibit mode-selective resonance, where periodic evidence along certain directions is amplified while evidence along others is attenuated.
 
 
 
@@ -784,8 +789,8 @@ Table~\ref{tab:validation} summarizes the agreement between theoretical predicti
 Underdamped frequency & $\omega = 0.693$ & $0.693$ & Exact \\
 Envelope decay time & $\tau = 7.07$ & $7.08$ & $< 0.2\%$ \\
 Stopping distance scaling & $d \propto \Lambda$ & $R^2 = 1.000$ & Exact \\
-Resonance frequency & $\omega_0 = 0.707$ & $0.707$ & $< 0.1\%$ \\
-Peak resonance amplitude & $A_{\max} = 2.36$ & $2.36$ & Exact \\
+Resonance frequency & $\omega_0 = 0.385$ & $0.389$ & $< 1.1\%$ \\
+Peak resonance amplitude & $A_{\max} \approx 4.3$ & $\sim 4.3$ & $< 5\%$ \\
 Decay time scaling & $\tau \propto \Lambda$ & $R^2 = 1.000$ & Exact \\
 \bottomrule
 \end{tabular}
@@ -996,8 +1001,6 @@ https://github.com/cdenn016/Hamiltonian-VFE
 
 \subsection*{Acknowledgments}
 Claude Sonnet 4.5 was utilized for programming our variational free energy descent simulation suite.  All code was manually reviewed, corrected, and mathematically validated by the author.  Furthermore, Claude was utilized for typesetting figures, LaTeX equations, and general organizational and manuscript clarity advice. The author further declares no funding or conflicts of interest.
-
-\appendix
 
 \appendix
 
