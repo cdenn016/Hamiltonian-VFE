@@ -62,48 +62,104 @@ from math_utils.numerical_utils import kl_gaussian as kl_gauss_util
 
 
 # =============================================================================
-# VFE-Connected Hamiltonian Classes
+# VFE-Connected Hamiltonian Classes (PROPER IMPLEMENTATION)
 # =============================================================================
+
+# Import the actual agent/system infrastructure
+from agent.agents import Agent
+from agent.system import MultiAgentSystem
+from config import AgentConfig, SystemConfig
+
+
+def create_particle_agent(
+    agent_id: int,
+    K: int = 3,
+    mu_q_init: np.ndarray = None,
+    mu_p_init: np.ndarray = None,
+    sigma_scale: float = 0.5,
+    phi_init: np.ndarray = None,
+    seed: int = None,
+) -> Agent:
+    """
+    Create a 0D particle agent for damping regime simulations.
+
+    This creates a REAL Agent object that can be used with compute_total_free_energy.
+
+    Args:
+        agent_id: Unique identifier
+        K: Latent dimension (belief mean dimension)
+        mu_q_init: Initial belief mean (shape: (K,))
+        mu_p_init: Initial prior mean (shape: (K,))
+        sigma_scale: Covariance scale
+        phi_init: Initial gauge field (shape: (3,))
+        seed: Random seed
+
+    Returns:
+        Agent: Properly initialized 0D particle agent
+    """
+    config = AgentConfig(
+        spatial_shape=(),  # 0D particle!
+        K=K,
+        mu_scale=1.0,
+        sigma_scale=sigma_scale,
+        phi_scale=0.1,
+        covariance_strategy="constant",
+    )
+
+    rng = np.random.default_rng(seed)
+    agent = Agent(agent_id=agent_id, config=config, rng=rng)
+
+    # Override with specified initial conditions
+    if mu_q_init is not None:
+        agent.mu_q = np.asarray(mu_q_init, dtype=np.float32)
+    if mu_p_init is not None:
+        agent.mu_p = np.asarray(mu_p_init, dtype=np.float32)
+    if phi_init is not None:
+        agent.gauge.phi = np.asarray(phi_init, dtype=np.float32)
+
+    return agent
+
 
 class VFEHamiltonian(BeliefHamiltonian):
     """
-    Hamiltonian using the actual Gauge Variational Free Energy as potential.
+    Hamiltonian using the ACTUAL Gauge Variational Free Energy as potential.
 
     H(μ, π) = T(π) + V(μ)
 
     Where:
     - T(π) = (1/2) π^T Λ^{-1} π  (kinetic, Fisher metric)
-    - V(μ) = F[q(μ), p, φ]       (potential = full VFE!)
+    - V(μ) = F[q(μ), p, φ]       (potential = ACTUAL VFE from compute_total_free_energy!)
 
-    The VFE includes:
-    - Self-coupling: α KL(q||p)
-    - Belief alignment: Σ_j β_ij KL(q_i||Ω_ij[q_j])
-    - Prior alignment: Σ_j γ_ij KL(p_i||Ω_ij[p_j])
-    - Observations: -E_q[log p(o|x)]
+    The VFE includes (from gradients/free_energy_clean.py):
+    - Self-coupling: α ∫ χ_i KL(q||p) dc
+    - Belief alignment: Σ_j ∫ χ_ij β_ij KL(q_i||Ω_ij[q_j]) dc
+    - Prior alignment: Σ_j ∫ χ_ij γ_ij KL(p_i||Ω_ij[p_j]) dc
+    - Observations: -∫ χ_i E_q[log p(o|x)] dc
 
-    This connects the damping regime simulations to the REAL physics!
+    This uses REAL Agent objects and compute_total_free_energy()!
     """
 
     def __init__(
         self,
-        agent,
-        system=None,
+        agent: Agent,
+        system: MultiAgentSystem = None,
         lambda_self: float = 1.0,
-        use_full_vfe: bool = True,
     ):
         """
         Initialize VFE-based Hamiltonian.
 
         Args:
-            agent: Agent object with beliefs q, priors p, gauge φ
+            agent: REAL Agent object with beliefs q, priors p, gauge φ
             system: Optional MultiAgentSystem for multi-agent VFE terms
-            lambda_self: Self-coupling strength
-            use_full_vfe: If True, use full VFE; if False, use just KL(q||p)
+            lambda_self: Self-coupling strength (used if no system)
         """
         self.agent = agent
         self.system = system
         self.lambda_self = lambda_self
-        self.use_full_vfe = use_full_vfe
+        self._K = agent.K
+
+        # Cache for gradient computation
+        self._grad_eps = 1e-5
 
         # Initialize parent with VFE-based potential and Fisher metric
         super().__init__(
@@ -115,30 +171,30 @@ class VFEHamiltonian(BeliefHamiltonian):
         """
         Compute VFE potential V(μ) = F[q(μ), p, φ].
 
-        The position q here represents the belief mean μ.
-        We update the agent's belief mean and compute VFE.
+        Uses the ACTUAL compute_total_free_energy or compute_self_energy
+        from gradients/free_energy_clean.py!
         """
-        # Update agent belief mean (temporarily)
+        # Store original and set new belief mean
         original_mu = self.agent.mu_q.copy()
+        self.agent.mu_q = q.astype(np.float32)
 
-        # Handle different dimensionalities
-        if self.agent.geometry.is_particle:
-            self.agent.mu_q = q.astype(np.float32)
-        else:
-            # For spatial agents, q might be flattened
-            self.agent.mu_q = q.reshape(self.agent.mu_q.shape).astype(np.float32)
+        # Invalidate any caches
+        if hasattr(self.agent, '_L_q_cache'):
+            self.agent._L_q_cache = None
 
-        # Compute VFE
-        if self.use_full_vfe and self.system is not None:
-            # Full multi-agent VFE
-            breakdown = compute_total_free_energy(self.system)
-            vfe = breakdown.total
-        else:
-            # Single-agent self-energy: KL(q||p)
-            vfe = compute_self_energy(self.agent, lambda_self=self.lambda_self)
-
-        # Restore original belief
-        self.agent.mu_q = original_mu
+        try:
+            if self.system is not None:
+                # Full multi-agent VFE with transport operators, softmax weights, etc.
+                breakdown = compute_total_free_energy(self.system)
+                vfe = breakdown.total
+            else:
+                # Single-agent self-energy: KL(q||p) with χ-weighted integration
+                vfe = compute_self_energy(self.agent, lambda_self=self.lambda_self)
+        finally:
+            # Always restore original belief
+            self.agent.mu_q = original_mu
+            if hasattr(self.agent, '_L_q_cache'):
+                self.agent._L_q_cache = None
 
         return float(vfe)
 
@@ -147,14 +203,9 @@ class VFEHamiltonian(BeliefHamiltonian):
         Fisher information metric G = Λ = Σ^{-1}.
 
         The Fisher metric for Gaussian beliefs is the precision matrix.
-        This provides the natural "mass" for belief dynamics.
+        This is the PROPER mass tensor for belief dynamics on statistical manifold.
         """
-        if self.agent.geometry.is_particle:
-            # 0D agent: single precision matrix
-            Sigma = self.agent.Sigma_q
-        else:
-            # Spatial agent: average precision (simplified)
-            Sigma = np.mean(self.agent.Sigma_q, axis=tuple(range(self.agent.geometry.ndim)))
+        Sigma = self.agent.Sigma_q
 
         # Fisher metric = precision = inverse covariance
         try:
@@ -163,6 +214,138 @@ class VFEHamiltonian(BeliefHamiltonian):
             Lambda = np.linalg.inv(Sigma + 1e-6 * np.eye(Sigma.shape[0]))
 
         return Lambda
+
+    def get_vfe_breakdown(self, q: np.ndarray) -> FreeEnergyBreakdown:
+        """Get detailed VFE breakdown at position q."""
+        original_mu = self.agent.mu_q.copy()
+        self.agent.mu_q = q.astype(np.float32)
+
+        try:
+            if self.system is not None:
+                breakdown = compute_total_free_energy(self.system)
+            else:
+                self_energy = compute_self_energy(self.agent, lambda_self=self.lambda_self)
+                breakdown = FreeEnergyBreakdown(
+                    self_energy=self_energy,
+                    belief_align=0.0,
+                    prior_align=0.0,
+                    observations=0.0,
+                    total=self_energy,
+                )
+        finally:
+            self.agent.mu_q = original_mu
+
+        return breakdown
+
+
+class MultiAgentVFEHamiltonian(BeliefHamiltonian):
+    """
+    Hamiltonian for multiple coupled agents using FULL gauge VFE.
+
+    H(μ₁, μ₂, ..., π₁, π₂, ...) = Σᵢ Tᵢ(πᵢ) + F[{qᵢ}, {pᵢ}, {φᵢ}]
+
+    Where:
+    - Tᵢ(πᵢ) = (1/2) πᵢ^T Λᵢ^{-1} πᵢ  (kinetic, agent i's Fisher metric)
+    - F = FULL multi-agent VFE with gauge transport!
+
+    The VFE includes GAUGE TRANSPORT:
+    - Σᵢ α KL(qᵢ||pᵢ)                           [self-coupling]
+    - Σᵢⱼ βᵢⱼ KL(qᵢ||Ω_ij[qⱼ])                  [belief alignment with transport!]
+    - Σᵢⱼ γᵢⱼ KL(pᵢ||Ω_ij[pⱼ])                  [prior alignment with transport!]
+
+    Transport operator: Ω_ij = exp(φᵢ) · exp(-φⱼ) ∈ SO(3)
+    """
+
+    def __init__(self, system: MultiAgentSystem):
+        """
+        Initialize multi-agent VFE Hamiltonian.
+
+        Args:
+            system: MultiAgentSystem with properly configured agents
+        """
+        self.system = system
+        self.agents = system.agents
+        self.n_agents = system.n_agents
+        self._K = self.agents[0].K  # Assume all agents have same K
+
+        # Total dimension: n_agents * K
+        self._dim = self.n_agents * self._K
+
+        # Initialize parent
+        super().__init__(
+            potential=self._vfe_potential,
+            metric=self._fisher_metric
+        )
+
+    def _vfe_potential(self, q: np.ndarray) -> float:
+        """
+        Compute FULL multi-agent VFE F[{qᵢ}, {pᵢ}, {φᵢ}].
+
+        Uses compute_total_free_energy(system) which includes:
+        - Self-coupling for each agent
+        - Belief alignment with gauge transport Ω_ij
+        - Prior alignment with gauge transport
+        - Softmax attention weights β_ij, γ_ij
+        - χ-weighted spatial integration
+        """
+        # Store original means
+        original_mus = [agent.mu_q.copy() for agent in self.agents]
+
+        # Update all agent belief means
+        for i, agent in enumerate(self.agents):
+            start_idx = i * self._K
+            end_idx = (i + 1) * self._K
+            agent.mu_q = q[start_idx:end_idx].astype(np.float32)
+
+        try:
+            # Compute FULL VFE with all terms
+            breakdown = compute_total_free_energy(self.system)
+            vfe = breakdown.total
+        finally:
+            # Restore all original beliefs
+            for i, agent in enumerate(self.agents):
+                agent.mu_q = original_mus[i]
+
+        return float(vfe)
+
+    def _fisher_metric(self, q: np.ndarray) -> np.ndarray:
+        """
+        Block-diagonal Fisher metric for all agents.
+
+        G = diag(Λ₁, Λ₂, ..., Λₙ) where Λᵢ = Σᵢ^{-1}
+        """
+        G = np.zeros((self._dim, self._dim))
+
+        for i, agent in enumerate(self.agents):
+            start_idx = i * self._K
+            end_idx = (i + 1) * self._K
+
+            Sigma = agent.Sigma_q
+            try:
+                Lambda = np.linalg.inv(Sigma)
+            except np.linalg.LinAlgError:
+                Lambda = np.linalg.inv(Sigma + 1e-6 * np.eye(self._K))
+
+            G[start_idx:end_idx, start_idx:end_idx] = Lambda
+
+        return G
+
+    def get_vfe_breakdown(self, q: np.ndarray) -> FreeEnergyBreakdown:
+        """Get detailed VFE breakdown at multi-agent state q."""
+        original_mus = [agent.mu_q.copy() for agent in self.agents]
+
+        for i, agent in enumerate(self.agents):
+            start_idx = i * self._K
+            end_idx = (i + 1) * self._K
+            agent.mu_q = q[start_idx:end_idx].astype(np.float32)
+
+        try:
+            breakdown = compute_total_free_energy(self.system)
+        finally:
+            for i, agent in enumerate(self.agents):
+                agent.mu_q = original_mus[i]
+
+        return breakdown
 
 
 # =============================================================================
@@ -277,12 +460,11 @@ class EpistemicOscillator:
     def _create_hamiltonian(self) -> BeliefHamiltonian:
         """Create BeliefHamiltonian from core dynamics suite."""
         if self.use_vfe:
-            # VFE mode: use actual free energy as potential
+            # VFE mode: use ACTUAL free energy as potential
             return VFEHamiltonian(
                 agent=self.agent,
-                system=None,  # Single agent
-                lambda_self=self.K,  # Use stiffness as self-coupling
-                use_full_vfe=False,  # Just KL(q||p) for single agent
+                system=None,  # Single agent (use from_agent with system for multi-agent)
+                lambda_self=self.K,  # Use stiffness as self-coupling strength
             )
         else:
             # Harmonic mode: simple quadratic potential
@@ -299,39 +481,36 @@ class EpistemicOscillator:
     @classmethod
     def from_agent(
         cls,
-        agent,
+        agent: Agent,
         damping: float,
         stiffness: float = 1.0,
+        system: MultiAgentSystem = None,
     ) -> 'EpistemicOscillator':
         """
-        Create oscillator from Agent using VFE theory.
+        Create oscillator from REAL Agent using ACTUAL VFE theory.
 
         This is the PROPER way to connect to gauge VFE:
         - Mass = Fisher metric = precision = Σ⁻¹
-        - Potential = VFE = KL(q||p)
+        - Potential = ACTUAL VFE = compute_self_energy(agent) or compute_total_free_energy(system)
 
         Args:
-            agent: Agent with beliefs, priors, gauge field
+            agent: REAL Agent object with beliefs, priors, gauge field
             damping: Damping coefficient γ
             stiffness: Self-coupling strength λ_self
+            system: Optional MultiAgentSystem for full VFE
 
         Returns:
             EpistemicOscillator configured for VFE dynamics
         """
-        # Get precision from agent's belief covariance
-        if agent.geometry.is_particle:
-            Sigma = agent.Sigma_q
-        else:
-            Sigma = np.mean(agent.Sigma_q, axis=tuple(range(agent.geometry.ndim)))
-
-        # Precision = inverse covariance (scalar for 1D, trace for multi-D)
+        # Get precision from agent's belief covariance (Fisher metric)
+        Sigma = agent.Sigma_q
         try:
             Lambda = np.linalg.inv(Sigma)
             precision = np.trace(Lambda) / Lambda.shape[0]  # Average precision
         except np.linalg.LinAlgError:
             precision = 1.0 / np.trace(Sigma) * Sigma.shape[0]
 
-        return cls(
+        osc = cls(
             precision=precision,
             stiffness=stiffness,
             damping=damping,
@@ -339,6 +518,52 @@ class EpistemicOscillator:
             agent=agent,
             use_vfe=True,
         )
+
+        # Store system for full VFE if provided
+        if system is not None:
+            osc._hamiltonian.system = system
+
+        return osc
+
+    @classmethod
+    def create_vfe_oscillator(
+        cls,
+        K: int = 3,
+        mu_q_init: np.ndarray = None,
+        mu_p_init: np.ndarray = None,
+        sigma_scale: float = 0.5,
+        damping: float = 0.5,
+        lambda_self: float = 1.0,
+        seed: int = None,
+    ) -> 'EpistemicOscillator':
+        """
+        Create a VFE-connected oscillator with a fresh particle agent.
+
+        This is the easiest way to get started with VFE dynamics!
+
+        Args:
+            K: Latent dimension
+            mu_q_init: Initial belief mean (default: random)
+            mu_p_init: Prior mean (default: zeros)
+            sigma_scale: Belief covariance scale
+            damping: Damping coefficient γ
+            lambda_self: Self-coupling strength
+            seed: Random seed
+
+        Returns:
+            EpistemicOscillator using actual VFE as potential
+        """
+        # Create a real particle agent
+        agent = create_particle_agent(
+            agent_id=0,
+            K=K,
+            mu_q_init=mu_q_init,
+            mu_p_init=mu_p_init if mu_p_init is not None else np.zeros(K),
+            sigma_scale=sigma_scale,
+            seed=seed,
+        )
+
+        return cls.from_agent(agent, damping=damping, stiffness=lambda_self)
 
     @property
     def hamiltonian(self) -> BeliefHamiltonian:
