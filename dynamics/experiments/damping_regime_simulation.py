@@ -1382,44 +1382,65 @@ def _plot_damping_regimes(results: Dict, output_dir: Path):
               'critical': 'Critical (Optimal)',
               'underdamped': 'Underdamped (Oscillatory)'}
 
+    # Check if VFE mode (results have 'use_vfe' key)
+    is_vfe = any(result.get('use_vfe', False) for result in results.values())
+
     # Row 1: Time evolution of belief μ(t)
     ax1 = fig.add_subplot(gs[0, :2])
     for regime, result in results.items():
-        ax1.plot(result['t'], result['mu'], color=colors[regime],
+        mu = result['mu']
+        ax1.plot(result['t'], mu, color=colors[regime],
                  linewidth=2.5, label=labels[regime], alpha=0.9)
     ax1.axhline(0, color='gray', linestyle='--', alpha=0.5, label='Equilibrium')
     ax1.set_xlabel('Time t', fontsize=12)
     ax1.set_ylabel('Belief μ(t)', fontsize=12)
-    ax1.set_title('Belief Evolution: Three Damping Regimes', fontsize=14, fontweight='bold')
+    title_suffix = " (VFE)" if is_vfe else ""
+    ax1.set_title(f'Belief Evolution: Three Damping Regimes{title_suffix}', fontsize=14, fontweight='bold')
     ax1.legend(loc='upper right', fontsize=10)
     ax1.grid(alpha=0.3)
     ax1.set_xlim(0, results['underdamped']['t'][-1])
 
-    # Row 1 right: Energy evolution
+    # Row 1 right: Energy evolution (or momentum magnitude for VFE)
     ax2 = fig.add_subplot(gs[0, 2])
     for regime, result in results.items():
-        total_E = result['kinetic_energy'] + result['potential_energy']
-        ax2.plot(result['t'], total_E, color=colors[regime],
-                 linewidth=2, label=regime.capitalize(), alpha=0.9)
+        if 'kinetic_energy' in result and 'potential_energy' in result:
+            # Simple mode: plot energy
+            total_E = result['kinetic_energy'] + result['potential_energy']
+            ax2.plot(result['t'], total_E, color=colors[regime],
+                     linewidth=2, label=regime.capitalize(), alpha=0.9)
+            ax2.set_ylabel('Total Energy', fontsize=12)
+            ax2.set_title('Energy Dissipation', fontsize=14, fontweight='bold')
+        else:
+            # VFE mode: plot momentum magnitude
+            pi = result['pi']
+            pi_mag = np.abs(pi) if pi.ndim == 1 else np.linalg.norm(pi, axis=1)
+            ax2.plot(result['t'], pi_mag, color=colors[regime],
+                     linewidth=2, label=regime.capitalize(), alpha=0.9)
+            ax2.set_ylabel('|π| (Momentum)', fontsize=12)
+            ax2.set_title('Momentum Decay (VFE)', fontsize=14, fontweight='bold')
     ax2.set_xlabel('Time t', fontsize=12)
-    ax2.set_ylabel('Total Energy', fontsize=12)
-    ax2.set_title('Energy Dissipation', fontsize=14, fontweight='bold')
     ax2.legend(fontsize=10)
     ax2.grid(alpha=0.3)
-    ax2.set_yscale('log')
+    try:
+        ax2.set_yscale('log')
+    except ValueError:
+        pass  # Can't use log scale if values <= 0
 
     # Row 2: Phase portraits (μ vs π)
     for idx, (regime, result) in enumerate(results.items()):
         ax = fig.add_subplot(gs[1, idx])
 
+        mu = result['mu']
+        pi = result['pi']
+
         # Phase trajectory
-        ax.plot(result['mu'], result['pi'], color=colors[regime],
+        ax.plot(mu, pi, color=colors[regime],
                 linewidth=2, alpha=0.8)
 
         # Mark start and end
-        ax.plot(result['mu'][0], result['pi'][0], 'o', color='green',
+        ax.plot(mu[0], pi[0], 'o', color='green',
                 markersize=12, label='Start', zorder=5)
-        ax.plot(result['mu'][-1], result['pi'][-1], 's', color='red',
+        ax.plot(mu[-1], pi[-1], 's', color='red',
                 markersize=10, label='End', zorder=5)
         ax.plot(0, 0, '*', color='gold', markersize=15,
                 label='Equilibrium', zorder=5)
@@ -1428,10 +1449,10 @@ def _plot_damping_regimes(results: Dict, output_dir: Path):
         n_arrows = 8
         arrow_idx = np.linspace(0, len(result['t'])-2, n_arrows, dtype=int)
         for i in arrow_idx:
-            dx = result['mu'][i+1] - result['mu'][i]
-            dy = result['pi'][i+1] - result['pi'][i]
-            ax.annotate('', xy=(result['mu'][i]+dx*0.6, result['pi'][i]+dy*0.6),
-                       xytext=(result['mu'][i], result['pi'][i]),
+            dx = mu[i+1] - mu[i]
+            dy = pi[i+1] - pi[i]
+            ax.annotate('', xy=(mu[i]+dx*0.6, pi[i]+dy*0.6),
+                       xytext=(mu[i], pi[i]),
                        arrowprops=dict(arrowstyle='->', color=colors[regime], alpha=0.6))
 
         ax.set_xlabel('Belief μ', fontsize=12)
@@ -1444,7 +1465,11 @@ def _plot_damping_regimes(results: Dict, output_dir: Path):
     # Row 3: Velocity and detailed analysis
     ax5 = fig.add_subplot(gs[2, 0])
     for regime, result in results.items():
-        ax5.plot(result['t'], result['velocity'], color=colors[regime],
+        vel = result['velocity']
+        # Handle VFE mode: velocity might be 2D (n_steps, K)
+        if vel.ndim > 1:
+            vel = vel[:, 0]  # Extract first component
+        ax5.plot(result['t'], vel, color=colors[regime],
                  linewidth=2, label=regime.capitalize(), alpha=0.9)
     ax5.axhline(0, color='gray', linestyle='--', alpha=0.5)
     ax5.set_xlabel('Time t', fontsize=12)
