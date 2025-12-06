@@ -590,16 +590,15 @@ To validate the theoretical predictions of the epistemic momentum framework, we 
 
 \subsection{Damping Regimes in Belief Dynamics}
 
-We examined the three dynamical regimes predicted by the epistemic oscillator model. For fixed precision $\Lambda = 2$ and evidence strength $K = 1$, the critical damping coefficient is $\gamma_c = 2\sqrt{K\Lambda} \approx 2.83$. We simulated belief evolution from an initial displacement $\mu_0 = 1$ with zero initial momentum under over-damped ($\gamma = 3\gamma_c$), critically damped ($\gamma = \gamma_c$), and under-damped ($\gamma = 0.2\gamma_c$) regimes.
+We examined the three dynamical regimes predicted by the epistemic oscillator model. For fixed precision $\Lambda = 2$ and evidence strength $K = 1$, the critical damping coefficient is $\gamma_c = 2\sqrt{K\Lambda} \approx 2.83$. We simulated belief evolution from an initial displacement $\mu_0 = 1$ with zero initial momentum under over-damped ($\gamma = 10$), near-critical ($\gamma = 1$), and under-damped ($\gamma = 0.1$) regimes.
 
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=1\linewidth]{damping_regimes.png}
-    \caption{\textbf{Three damping regimes in epistemic dynamics.} 
-    Numerical integration of the damped belief oscillator (Eq.~\ref{eq:damped_oscillator}) 
-    for fixed precision $\Lambda = 2$ and stiffness $K = 1$, with damping coefficients 
-    yielding overdamped ($\gamma > 2\sqrt{K\Lambda}$), critically damped 
-    ($\gamma = 2\sqrt{K\Lambda}$), and underdamped ($\gamma < 2\sqrt{K\Lambda}$) dynamics. 
+    \caption{\textbf{Three damping regimes in epistemic dynamics.}
+    Numerical integration of the damped belief oscillator
+    for fixed precision $\Lambda = 2$ and stiffness $K = 1$, with damping coefficients
+    $\gamma = 10$ (overdamped), $\gamma = 1$ (near-critical), and $\gamma = 0.1$ (underdamped). 
     \textbf{Top left:} Belief trajectories showing monotonic decay (overdamped), 
     fastest equilibration (critical), and oscillatory approach with overshooting (underdamped). 
     \textbf{Top right:} Energy dissipation on logarithmic scale. 
@@ -616,7 +615,7 @@ Figure~\ref{fig:damping_regimes} displays the results of these studies. The over
 
 The phase space portraits reveal the geometric differences between regimes. Over-damped trajectories spiral inward towards equilibrium, the critically damped trajectories approach the origin along a separatrix, and the under-damped trajectories execute diminishing elliptical orbits characteristic of a damped harmonic oscillator. The under-damped oscillations represent a novel prediction absent from standard Bayesian inference in that beliefs can transiently overshoot the rational posterior and temporarily adopting positions more extreme than warranted by evidence before relaxing to steady equilibrium.
 
-The measured decay times match those of the theoretical predictions. In the under-damped case, we observe a frequency $\omega = \sqrt{K/\Lambda - \gamma^2/4\Lambda^2} \approx 0.69$~rad/time, in exact agreement with theory. The envelope decay time $\tau = 2\Lambda/\gamma \approx 7.1$ matches the observed exponential decay of oscillation amplitude.
+The measured decay times match the theoretical predictions. In the under-damped case with $\gamma = 0.1$, we observe a frequency $\omega = \sqrt{K/\Lambda - \gamma^2/4\Lambda^2} \approx 0.71$~rad/time, in agreement with theory. The envelope decay time $\tau = 2\Lambda/\gamma = 40$ matches the observed slow exponential decay of oscillation amplitude.
 
 \subsection{Momentum Transfer Between Coupled Agents}
 
