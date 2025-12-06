@@ -83,6 +83,8 @@ comparison_results/
 *.pkl
 *.npy
 checkpoints/
+_experiments/
+manuscript/
 
 # Generated analysis output
 empirical/helicopter/output/
