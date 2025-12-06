@@ -454,6 +454,12 @@ class EpistemicOscillator:
         self.agent = agent
         self.use_vfe = use_vfe and agent is not None
 
+        # Set latent dimension for VFE mode
+        if self.use_vfe and agent is not None:
+            self._K = agent.K  # Latent dimension from agent
+        else:
+            self._K = 1  # Scalar mode
+
         # Build core suite Hamiltonian
         self._hamiltonian = self._create_hamiltonian()
 
@@ -620,31 +626,53 @@ class EpistemicOscillator:
 
         Uses core suite's equations_of_motion and adds damping.
 
-        dy/dt = [dμ/dt, dπ/dt]
-              = [π/M, -K(μ - μ*) - γ·(π/M) + f(t)]
+        Handles both:
+        - Scalar mode: y = [μ, π]
+        - VFE mode: y = [μ₀, μ₁, ..., μ_{K-1}, π₀, π₁, ..., π_{K-1}]
         """
-        mu, pi = y
-        q = np.array([mu])
-        p = np.array([pi])
+        if self.use_vfe:
+            # VFE mode: K-dimensional state
+            K = self._K
+            mu = y[:K]
+            pi = y[K:]
 
-        # Get conservative dynamics from core Hamiltonian
-        dq_dt, dp_dt = self._hamiltonian.equations_of_motion(q, p)
+            # Get conservative dynamics from VFE Hamiltonian
+            dq_dt, dp_dt = self._hamiltonian.equations_of_motion(mu, pi)
 
-        # Velocity
-        dmu_dt = dq_dt[0]
+            # Add damping: dπ/dt += -γ * v where v = dq/dt
+            dpi_dt = dp_dt - self.gamma * dq_dt
 
-        # Add damping and external forcing
-        force_damping = -self.gamma * dmu_dt
-        force_external = forcing(t) if forcing else 0.0
+            # Add external forcing (applied to first component only)
+            if forcing is not None:
+                force_vec = np.zeros(K)
+                force_vec[0] = forcing(t)
+                dpi_dt = dpi_dt + force_vec
 
-        dpi_dt = dp_dt[0] + force_damping + force_external
+            return np.concatenate([dq_dt, dpi_dt])
+        else:
+            # Scalar mode
+            mu, pi = y
+            q = np.array([mu])
+            p = np.array([pi])
 
-        return np.array([dmu_dt, dpi_dt])
+            # Get conservative dynamics from core Hamiltonian
+            dq_dt, dp_dt = self._hamiltonian.equations_of_motion(q, p)
+
+            # Velocity
+            dmu_dt = dq_dt[0]
+
+            # Add damping and external forcing
+            force_damping = -self.gamma * dmu_dt
+            force_external = forcing(t) if forcing else 0.0
+
+            dpi_dt = dp_dt[0] + force_damping + force_external
+
+            return np.array([dmu_dt, dpi_dt])
 
     def simulate(
         self,
-        mu0: float,
-        pi0: float,
+        mu0: Union[float, np.ndarray],
+        pi0: Union[float, np.ndarray],
         t_end: float,
         dt: float = 0.01,
         forcing: Optional[Callable] = None,
@@ -654,8 +682,8 @@ class EpistemicOscillator:
         Simulate belief evolution.
 
         Args:
-            mu0: Initial belief position
-            pi0: Initial momentum
+            mu0: Initial belief position (scalar or K-dim array for VFE mode)
+            pi0: Initial momentum (scalar or K-dim array for VFE mode)
             t_end: Simulation end time
             dt: Time step
             forcing: Optional external forcing function f(t)
@@ -665,13 +693,22 @@ class EpistemicOscillator:
             Dictionary with trajectory data
         """
         # For conservative systems (no damping, no forcing), use symplectic
-        if use_symplectic and self.gamma == 0 and forcing is None:
+        if use_symplectic and self.gamma == 0 and forcing is None and not self.use_vfe:
             return self._simulate_symplectic(mu0, pi0, t_end, dt)
+
+        # Build initial state vector
+        if self.use_vfe:
+            # VFE mode: concatenate K-dim vectors
+            mu0 = np.asarray(mu0).flatten()
+            pi0 = np.asarray(pi0).flatten()
+            y0 = np.concatenate([mu0, pi0])
+        else:
+            # Scalar mode
+            y0 = np.array([mu0, pi0])
 
         # For dissipative systems, use scipy (damping breaks symplecticity)
         t_span = (0, t_end)
         t_eval = np.arange(0, t_end, dt)
-        y0 = np.array([mu0, pi0])
 
         sol = solve_ivp(
             lambda t, y: self.equations_of_motion(t, y, forcing),
@@ -682,14 +719,27 @@ class EpistemicOscillator:
             max_step=dt
         )
 
-        return {
-            't': sol.t,
-            'mu': sol.y[0],
-            'pi': sol.y[1],
-            'velocity': sol.y[1] / self.M,
-            'kinetic_energy': 0.5 * sol.y[1]**2 / self.M,
-            'potential_energy': 0.5 * self.K * (sol.y[0] - self.mu_eq)**2,
-        }
+        if self.use_vfe:
+            # VFE mode: extract K-dim trajectories
+            K = self._K
+            mu_traj = sol.y[:K, :].T  # Shape: (n_steps, K)
+            pi_traj = sol.y[K:, :].T  # Shape: (n_steps, K)
+            return {
+                't': sol.t,
+                'mu': mu_traj,
+                'pi': pi_traj,
+                'velocity': pi_traj / self.M,  # Approximate
+            }
+        else:
+            # Scalar mode
+            return {
+                't': sol.t,
+                'mu': sol.y[0],
+                'pi': sol.y[1],
+                'velocity': sol.y[1] / self.M,
+                'kinetic_energy': 0.5 * sol.y[1]**2 / self.M,
+                'potential_energy': 0.5 * self.K * (sol.y[0] - self.mu_eq)**2,
+            }
 
     def _simulate_symplectic(
         self,
