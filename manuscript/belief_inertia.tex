@@ -586,7 +586,7 @@ Our epistemic momentum framework unifies seemingly disparate phenomena such as c
 
 \subsection{Computational Validation}
 
-To validate the theoretical predictions of the epistemic momentum framework, we conducted numerical simulations of the epistemic inertia framework. All simulations employed fourth-order Runge-Kutta integration with adaptive step sizes, implemented in Python using SciPy's \texttt{solve\_ivp} routine on an AMD Ryzen 9900x workstation. Energy conservation was continually monitored throughout to ensure numerical stability, with typical energy drift below $10^{-6}$ per unit time in the absence of dissipation. Source code for all simulations is available in our public repository.
+To validate the theoretical predictions of the epistemic momentum framework, we conducted numerical simulations using symplectic integration. All simulations employed leapfrog (Störmer-Verlet) integration, which preserves the Hamiltonian phase space structure and ensures bounded energy drift over long time scales. Simulations were implemented in Python on an AMD Ryzen 9900x workstation. Energy conservation was monitored throughout, with typical energy drift below $10^{-6}$ per unit time in the absence of dissipation. Source code for all simulations is available in our public repository.
 
 \subsection{Damping Regimes in Belief Dynamics}
 
