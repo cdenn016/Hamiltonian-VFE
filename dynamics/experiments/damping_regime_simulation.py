@@ -1685,13 +1685,14 @@ def _plot_momentum_transfer(result: Dict, output_dir: Path):
     ax2.legend(fontsize=10)
     ax2.grid(alpha=0.3)
 
-    # Add annotation for recoil
+    # Add annotation for recoil (positioned to avoid title overlap)
     peak_idx = np.argmax(result['pi2'])
+    peak_val = result['pi2'][peak_idx]
     ax2.annotate('Momentum\ntransfer',
-                xy=(t[peak_idx], result['pi2'][peak_idx]),
-                xytext=(t[peak_idx]+2, result['pi2'][peak_idx]+0.3),
-                fontsize=10, ha='left',
-                arrowprops=dict(arrowstyle='->', color='black'))
+                xy=(t[peak_idx], peak_val),
+                xytext=(t[peak_idx]+3, peak_val * 0.7),  # Position below peak
+                fontsize=9, ha='left',
+                arrowprops=dict(arrowstyle='->', color='black', lw=0.8))
 
     # Panel 3: Total and difference
     ax3 = fig.add_subplot(gs[0, 2])
@@ -2017,24 +2018,35 @@ def simulate_resonance(
         Sigma_p = agent.Sigma_p
         lambda_self = osc.hamiltonian.lambda_self
 
+        Lambda_q = np.linalg.inv(Sigma_q)  # Mass matrix M = Λ_q
         Lambda_p = np.linalg.inv(Sigma_p)
-        M_inv_K = Sigma_q @ (lambda_self * Lambda_p)
+        K_matrix = lambda_self * Lambda_p  # Stiffness matrix
+        M_inv_K = Sigma_q @ K_matrix
 
-        eigenvalues = np.linalg.eigvalsh(M_inv_K)
+        # Get eigenvalues AND eigenvectors to compute effective mass
+        eigenvalues, eigenvectors = np.linalg.eigh(M_inv_K)
         omega_squared = np.abs(eigenvalues)  # Should all be positive for stable system
         natural_frequencies = np.sqrt(omega_squared)
 
-        # The dominant (lowest) natural frequency determines resonance
-        omega_0 = np.min(natural_frequencies)
+        # Find the dominant (lowest frequency) mode
+        min_idx = np.argmin(omega_squared)
+        omega_0 = natural_frequencies[min_idx]
         omega_max = np.max(natural_frequencies)
+        v_dominant = eigenvectors[:, min_idx]  # Eigenvector for lowest mode
+
+        # Effective mass for dominant mode: M_eff = v^T M v
+        # (eigenvector is normalized, so this gives the projected mass)
+        effective_precision = float(v_dominant @ Lambda_q @ v_dominant)
+        effective_stiffness = float(v_dominant @ K_matrix @ v_dominant)
+
+        # Verify: ω₀² should equal K_eff / M_eff
+        omega_check = np.sqrt(effective_stiffness / effective_precision)
 
         print(f"VFE natural frequencies: {natural_frequencies}")
         print(f"Dominant (lowest) ω₀ = {omega_0:.3f}")
         print(f"Highest ω_max = {omega_max:.3f}")
-
-        # Effective M and K for theoretical formulas (using lowest frequency)
-        effective_precision = 1.0  # Normalized for VFE
-        effective_stiffness = omega_0**2 * effective_precision
+        print(f"Effective M_eff = {effective_precision:.3f}, K_eff = {effective_stiffness:.3f}")
+        print(f"Check: √(K_eff/M_eff) = {omega_check:.3f}")
 
         # Store VFE-specific results
         vfe_results = {
