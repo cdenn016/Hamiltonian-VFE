@@ -1983,35 +1983,13 @@ def simulate_resonance(
         output_dir = Path("_experiments/resonance")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    omega_0 = np.sqrt(stiffness / precision)  # Natural frequency
-    omega_res = omega_0  # For light damping
-
-    if omega_range is None:
-        omega_range = np.linspace(0.1, 3*omega_0, 50)
-
     print("\n" + "="*70)
     print("SIMULATION 4: RESONANCE CURVE")
     if use_vfe:
         print(">>> USING ACTUAL GAUGE VFE THEORY <<<")
     print("="*70)
-    print(f"Precision M = {precision}")
-    print(f"Stiffness K = {stiffness}")
     print(f"Damping γ = {damping}")
-    print(f"Natural frequency ω₀ = √(K/M) = {omega_0:.3f}")
     print(f"Forcing amplitude f₀ = {forcing_amplitude}")
-    if use_vfe:
-        print(f"Latent dimension K = {K_latent}")
-    print()
-
-    results = {
-        'omega': omega_range,
-        'omega_0': omega_0,
-        'amplitude': [],
-        'theoretical_amplitude': [],
-        'phase': [],
-        'example_trajectories': {},
-        'use_vfe': use_vfe,
-    }
 
     if use_vfe:
         # VFE mode: Create oscillator with actual VFE
@@ -2026,19 +2004,83 @@ def simulate_resonance(
             seed=42,
         )
         print(f"Hamiltonian type: {type(osc.hamiltonian).__name__}")
+        print(f"Latent dimension K = {K_latent}")
+
+        # VFE mode: Compute natural frequency from eigenvalues of M⁻¹K
+        # From Hamiltonian: H = (1/2) π^T M⁻¹ π + V(μ)
+        # The Fisher metric returns Σ_q (covariance) as M⁻¹
+        # So mass M = Σ_q⁻¹ = Λ_q (precision is mass!)
+        # Stiffness K = λ_self * Λ_p (from VFE gradient ∇V = λ_self * Λ_p * (μ_q - μ_p))
+        # Natural frequencies: ω² = eigenvalues of M⁻¹K = Σ_q @ (λ_self * Λ_p)
+        agent = osc.hamiltonian.agent
+        Sigma_q = agent.Sigma_q
+        Sigma_p = agent.Sigma_p
+        lambda_self = osc.hamiltonian.lambda_self
+
+        Lambda_p = np.linalg.inv(Sigma_p)
+        M_inv_K = Sigma_q @ (lambda_self * Lambda_p)
+
+        eigenvalues = np.linalg.eigvalsh(M_inv_K)
+        omega_squared = np.abs(eigenvalues)  # Should all be positive for stable system
+        natural_frequencies = np.sqrt(omega_squared)
+
+        # The dominant (lowest) natural frequency determines resonance
+        omega_0 = np.min(natural_frequencies)
+        omega_max = np.max(natural_frequencies)
+
+        print(f"VFE natural frequencies: {natural_frequencies}")
+        print(f"Dominant (lowest) ω₀ = {omega_0:.3f}")
+        print(f"Highest ω_max = {omega_max:.3f}")
+
+        # Effective M and K for theoretical formulas (using lowest frequency)
+        effective_precision = 1.0  # Normalized for VFE
+        effective_stiffness = omega_0**2 * effective_precision
+
+        # Store VFE-specific results
+        vfe_results = {
+            'natural_frequencies': natural_frequencies,
+            'omega_min': omega_0,
+            'omega_max': omega_max,
+        }
     else:
         # Simple quadratic mode
+        omega_0 = np.sqrt(stiffness / precision)  # Natural frequency
+        effective_precision = precision
+        effective_stiffness = stiffness
+        vfe_results = None  # No VFE-specific data
         osc = EpistemicOscillator(
             precision=precision,
             stiffness=stiffness,
             damping=damping,
             equilibrium=0.0
         )
+        print(f"Precision M = {precision}")
+        print(f"Stiffness K = {stiffness}")
+        print(f"Natural frequency ω₀ = √(K/M) = {omega_0:.3f}")
+
+    omega_res = omega_0  # For light damping
+
+    if omega_range is None:
+        omega_range = np.linspace(0.1, 3*omega_0, 50)
+
+    print()
+
+    results = {
+        'omega': omega_range,
+        'omega_0': omega_0,
+        'amplitude': [],
+        'theoretical_amplitude': [],
+        'phase': [],
+        'example_trajectories': {},
+        'use_vfe': use_vfe,
+        'vfe_data': vfe_results,  # VFE-specific: natural frequencies, etc.
+    }
 
     # Theoretical amplitude function (Eq. 41)
+    # For VFE mode, use effective_precision computed from eigenvalues
     def theoretical_amplitude(omega):
-        numerator = forcing_amplitude / precision
-        denominator = np.sqrt((omega_0**2 - omega**2)**2 + (damping * omega / precision)**2)
+        numerator = forcing_amplitude / effective_precision
+        denominator = np.sqrt((omega_0**2 - omega**2)**2 + (damping * omega / effective_precision)**2)
         return numerator / denominator
 
     for omega in omega_range:
@@ -2086,12 +2128,14 @@ def simulate_resonance(
     results['measured_A_max'] = results['amplitude'][peak_idx]
 
     # Theoretical peak amplitude
-    A_max_theory = (forcing_amplitude / damping) * np.sqrt(precision / stiffness)
+    # For VFE mode, use effective values computed from eigenvalues
+    A_max_theory = (forcing_amplitude / damping) * np.sqrt(effective_precision / effective_stiffness)
     results['theoretical_A_max'] = A_max_theory
 
     print(f"Measured resonance: ω = {results['measured_omega_res']:.3f}, A = {results['measured_A_max']:.3f}")
-    print(f"Theoretical: ω = {omega_0:.3f}, A_max = {A_max_theory:.3f}")
+    print(f"Predicted resonance: ω = {omega_0:.3f}, A_max = {A_max_theory:.3f}")
     if use_vfe:
+        print(f"(VFE mode: ω₀ computed from eigenvalues of M⁻¹K)")
         print(f"Using VFE Hamiltonian: {type(osc.hamiltonian).__name__}")
 
     _plot_resonance(results, output_dir, precision, stiffness, damping, forcing_amplitude)
